@@ -869,6 +869,15 @@ msgstr "{} pisze..."
 msgid "Rozmowa z {}"
 msgstr "Rozmowa z {}"
 
+#: src/ui/gui.py:5195
+#, python-brace-format
+msgid "--- Chat history with %s ---"
+msgstr "--- Historia rozmowy z %s ---"
+
+#: src/ui/gui.py:5213
+msgid "--- End of history ---"
+msgstr "--- Koniec historii ---"
+
 #~ msgid "Channels"
 #~ msgstr "Kanały"
 

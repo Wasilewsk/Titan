@@ -103,3 +103,36 @@ msgstr ""
 msgid "Component {} {}"
 msgstr "Komponent {} {}"
 
+msgid "Tips Settings"
+msgstr "Ustawienia porad"
+
+msgid "Speak tips:"
+msgstr "Mów porady:"
+
+msgid "Every minute"
+msgstr "Co minutę"
+
+msgid "Every 5 minutes"
+msgstr "Co 5 minut"
+
+msgid "Every 10 minutes"
+msgstr "Co 10 minut"
+
+msgid "Every 15 minutes"
+msgstr "Co 15 minut"
+
+msgid "Every hour"
+msgstr "Co godzinę"
+
+msgid "Tips"
+msgstr "Porady"
+
+msgid "Tip: %s"
+msgstr "Porada: %s"
+
+msgid "Save"
+msgstr "Zapisz"
+
+msgid "Cancel"
+msgstr "Anuluj"
+

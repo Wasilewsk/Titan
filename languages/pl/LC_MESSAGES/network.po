@@ -552,8 +552,104 @@ msgid "{} pisze"
 msgstr "{} pisze"
 
 #: src/network/messenger_webview.py:1234
-msgid "Ktoś pisze"
+msgid "Someone is typing"
 msgstr "Ktoś pisze"
+
+#: src/network/messenger_webview.py:1216 src/network/messenger_webview.py:1231
+msgid "Someone"
+msgstr "Ktoś"
+
+#: src/network/messenger_webview.py:2141 src/network/messenger_webview.py:2186
+msgid "Error fetching debug info"
+msgstr "Błąd pobierania informacji debug"
+
+#: src/network/messenger_webview.py:2146
+msgid ""
+"Voice Call Debug Info:\n"
+"\n"
+msgstr ""
+"Informacje debug połączeń głosowych:\n"
+"\n"
+
+#: src/network/messenger_webview.py:2151
+msgid "Monitoring configured"
+msgstr "Monitoring skonfigurowany"
+
+#: src/network/messenger_webview.py:2152
+msgid "RTCPeerConnection available"
+msgstr "RTCPeerConnection dostępny"
+
+#: src/network/messenger_webview.py:2153
+msgid "getUserMedia available"
+msgstr "getUserMedia dostępny"
+
+#: src/network/messenger_webview.py:2154
+msgid "Observer active"
+msgstr "Obserwator aktywny"
+
+#: src/network/messenger_webview.py:2157
+msgid "Call state"
+msgstr "Status połączenia"
+
+#: src/network/messenger_webview.py:2158
+msgid "Active"
+msgstr "Aktywne"
+
+#: src/network/messenger_webview.py:2159
+msgid "Type"
+msgstr "Typ"
+
+#: src/network/messenger_webview.py:2159
+msgid "none"
+msgstr "brak"
+
+#: src/network/messenger_webview.py:2160
+msgid "UI visible"
+msgstr "Interfejs widoczny"
+
+#: src/network/messenger_webview.py:2161
+msgid "Streams"
+msgstr "Strumienie"
+
+#: src/network/messenger_webview.py:2163
+msgid "DOM elements"
+msgstr "Elementy DOM"
+
+#: src/network/messenger_webview.py:2164
+msgid "Call elements"
+msgstr "Elementy połączenia"
+
+#: src/network/messenger_webview.py:2165
+msgid "Voice elements"
+msgstr "Elementy głosowe"
+
+#: src/network/messenger_webview.py:2166
+msgid "Messenger elements"
+msgstr "Elementy Messengera"
+
+#: src/network/messenger_webview.py:2168
+msgid "Local settings"
+msgstr "Ustawienia lokalne"
+
+#: src/network/messenger_webview.py:2169
+msgid "Calls enabled"
+msgstr "Połączenia włączone"
+
+#: src/network/messenger_webview.py:2170
+msgid "Notifications"
+msgstr "Powiadomienia"
+
+#: src/network/messenger_webview.py:2172
+msgid "Logged in"
+msgstr "Zalogowany"
+
+#: src/network/messenger_webview.py:2173
+msgid "Local call active"
+msgstr "Aktywne połączenie lokalne"
+
+#: src/network/messenger_webview.py:2177
+msgid "Voice Call Debug"
+msgstr "Debug połączeń głosowych"
 
 #: src/network/messenger_webview.py:1255 src/network/messenger_webview.py:1257
 #: src/network/messenger_webview.py:1259 src/network/messenger_webview.py:1399
