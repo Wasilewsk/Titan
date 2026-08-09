@@ -29,8 +29,8 @@ try:
     DOCX_AVAILABLE = True
 except ImportError:
     DOCX_AVAILABLE = False
-    print("Biblioteka 'python-docx' nie jest zainstalowana. Otwieranie plików .docx będzie niemożliwe.")
-    print("Aby zainstalować, użyj: pip install python-docx")
+    print("Library 'python-docx' is not installed. Opening .docx files will not be possible.")
+    print("To install, run: pip install python-docx")
 
 try:
     import pypandoc
@@ -232,7 +232,7 @@ class SettingsDialog(wx.Dialog):
             try:
                  self.config.read(self.ini_path, encoding='utf-8')
             except configparser.Error as e:
-                 wx.LogError(f"Błąd podczas czytania pliku ustawień: {e}")
+                 wx.LogError(_("Error reading settings file: %s") % e)
                  self.config = configparser.ConfigParser() # Zainicjuj od nowa w przypadku błędu
                  self.config['Ogólne'] = {}
                  self.config['Tekst'] = {}
@@ -391,7 +391,7 @@ class SettingsDialog(wx.Dialog):
             with open(self.ini_path, 'w', encoding='utf-8') as f:
                 self.config.write(f)
         except IOError as e:
-             wx.LogError(f"Nie można zapisać pliku ustawień: {e}")
+             wx.LogError(_("Cannot save settings file: %s") % e)
 
         self.EndModal(wx.ID_OK)
 
@@ -608,7 +608,7 @@ class TextEditor(wx.Frame):
             try:
                  self.config.read(self.ini_path, encoding='utf-8')
             except configparser.Error as e:
-                 wx.LogError(f"Błąd podczas czytania pliku ustawień: {e}")
+                 wx.LogError(_("Error reading settings file: %s") % e)
                  # Zainicjuj domyślne, jeśli wystąpił błąd
                  self.config = configparser.ConfigParser()
                  self.config['Ogólne'] = {}
@@ -915,7 +915,7 @@ class TextEditor(wx.Frame):
         info.SetVersion("0.1")
         info.SetDescription(_("TEdit jest edytorem tekstowym,\naplikacja jest jednym z podstawowych składników tSuite."))
         info.SetCopyright("(c) 2024 TitoSoft")
-        info.AddDeveloper("Twoje Imię/Nazwa (opcjonalnie)") # Możesz dodać swoje imię/nazwę
+        info.AddDeveloper(_("Your Name (optional)")) # Możesz dodać swoje imię/nazwę
         info.SetLicence(_("Licencja (np. MIT, GPL - opcjonalnie)")) # Dodaj informację o licencji, jeśli jest
         # info.SetWebSite("Twoja strona (opcjonalnie)") # Dodaj stronę projektu
         # info.SetIcon(wx.Icon("ikonka.png", wx.BITMAP_TYPE_PNG)) # Opcjonalnie: ustaw ikonkę
@@ -1096,4 +1096,12 @@ if __name__ == "__main__":
     app = wx.App()
     frame = TextEditor(None) # Usunięto title="TEdit" z Frame, bo ustawiamy je w __init__
     frame.Show()
+    # Join the Titan Action Bus, so Titan and its AI can drive this editor
+    # (open, read, edit, save the document that is actually open). Never fatal:
+    # tEdit must run exactly as before when Titan is not there.
+    try:
+        import tedit_actions
+        tedit_actions.attach(frame)
+    except Exception as _e:
+        print(f"[tEdit] Titan actions unavailable: {_e}")
     app.MainLoop()

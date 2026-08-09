@@ -638,6 +638,24 @@ class ComponentManager:
                 # Continue with next component
                 continue
         print(f"[ComponentManager] Finished initializing components")
+        # A component may declare TITAN_ACTIONS, and Titan finds those on the
+        # module it has loaded - which has only just happened. Without this the
+        # action registry would keep a snapshot taken before any component
+        # existed, and their actions would be invisible until it expired.
+        try:
+            from src.titan_core import actions as titan_actions_api
+            titan_actions_api.invalidate()
+        except Exception as e:
+            print(f"[ComponentManager] Could not refresh the action registry: {e}")
+        # A .TCS script Titan was asked to open runs here and nowhere else:
+        # this is the first moment at which every action a script can name
+        # actually exists, and it is the one place all three startup modes
+        # (normal, Klango, launcher) pass through.
+        try:
+            from src.titan_core import script_launch
+            script_launch.run_pending()
+        except Exception as e:
+            print(f"[ComponentManager] Could not run the requested script: {e}")
 
     def shutdown_components(self):
         """Shuts down all loaded components."""

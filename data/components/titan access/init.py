@@ -59,15 +59,29 @@ def stop_reader():
 
 
 def toggle_reader():
-    """Turn the screen reader on if off, or off if on (Ctrl+Shift+Alt+T)."""
+    """Turn the screen reader on if off, or off if on (Ctrl+Shift+Alt+T).
+
+    Persists the resulting state to General/Enabled, same as the settings
+    checkbox, so a restart of Titan respects whatever the hotkey last left it
+    at instead of only remembering the settings panel's choice.
+    """
     with _toggle_lock:
         try:
             if is_active():
                 print("[TitanAccess] toggling OFF")
                 stop_reader()
+                new_state = False
             else:
                 print("[TitanAccess] toggling ON")
                 start_reader()
+                new_state = True
+            try:
+                from titan_access.settings_store import get_settings
+                st = get_settings()
+                st.enabled = new_state
+                st.save()
+            except Exception as e:
+                print(f"[TitanAccess] toggle persist error: {e}")
         except Exception as e:
             print(f"[TitanAccess] toggle error: {e}")
             import traceback
@@ -217,6 +231,27 @@ def _standalone():
     finally:
         stop_reader()
         _stop_hotkey()
+
+
+# ===========================================================================
+# Titan actions - what Titan, its AI and other add-ons can ask this component
+# ===========================================================================
+# Declared in Python rather than in an __actions.json, because the handlers are
+# the component's own functions and Titan finds them on the module it already
+# loaded. Either form works; a manifest file is never required.
+#
+# The handlers live in titan_access_actions so this file stays what it says it
+# is - the component's lifecycle. The reader-state actions there need this
+# module's start/stop/toggle, so it is handed over rather than imported by name
+# (the component loader may load this file under any module name).
+
+try:
+    import titan_access_actions as _actions
+    _actions.bind(sys.modules[__name__])
+    TITAN_ACTIONS = _actions.TITAN_ACTIONS
+except Exception as _e:                 # actions unavailable, component is not
+    print(f"[TitanAccess] actions unavailable: {_e}")
+    TITAN_ACTIONS = []
 
 
 if __name__ == "__main__":

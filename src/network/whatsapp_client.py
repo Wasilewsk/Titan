@@ -57,10 +57,10 @@ class WhatsAppClient:
         self.typing_callbacks.append(callback)
     
     def open_whatsapp_web(self):
-        """Open WhatsApp Web in WebView (integrated with Titan IM)"""
+        """Open the accessible WhatsApp client (WhatsApp Web runs offscreen)"""
         try:
-            # Use the existing WebView integration
-            whatsapp_window = whatsapp_webview.show_whatsapp_webview(None)
+            from src.network.whatsapp_titan_gui import show_whatsapp_client
+            whatsapp_window = show_whatsapp_client(None)
             if whatsapp_window:
                 return True
             else:
@@ -69,7 +69,7 @@ class WhatsAppClient:
                 webbrowser.open('https://web.whatsapp.com')
                 return True
         except Exception as e:
-            print(f"Błąd podczas otwierania WhatsApp Web: {e}")
+            print(f"Error opening WhatsApp Web: {e}")
             return False
     
     def start_connection(self, username="TitanUser", password=None):
@@ -115,7 +115,7 @@ class WhatsAppClient:
                 return True
             return False
         except Exception as e:
-            print(f"Błąd podczas uruchamiania WhatsApp Web: {e}")
+            print(f"Error starting WhatsApp Web: {e}")
             return False
     
     async def _websocket_handler(self):

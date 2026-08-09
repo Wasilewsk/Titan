@@ -3540,6 +3540,22 @@ class InvisibleUI:
         except Exception as e:
             print(f"Error starting hotkey update thread: {e}")
 
+    def is_titan_ui_on(self):
+        """True only while Titan UI mode is really taking keys.
+
+        Deliberately not the same as `active`: the invisible interface is
+        active whenever Titan is minimised to the tray, while Titan UI is the
+        mode the tilde key toggles inside it. Anything a user configured as
+        "active only in Titan UI" must ask this, not `active`.
+        """
+        try:
+            return bool(self.active
+                        and self.titan_ui_mode
+                        and not self.titan_ui_temporarily_disabled
+                        and not self._shutdown_in_progress)
+        except AttributeError:
+            return False
+
     def temporarily_disable_titan_ui(self, dialog_name):
         """Temporarily disable Titan UI when a dialog opens"""
         if self.titan_ui_mode and not self.titan_ui_temporarily_disabled:
@@ -3808,7 +3824,7 @@ class InvisibleUI:
                 self.speak(_("Cannot open Messenger - application not ready"))
                 return
 
-            from src.network import messenger_webview
+            from src.network.messenger_titan_gui import show_messenger_client
             
             # Auto-disable Titan UI when webview opens
             if self.titan_ui_mode:
@@ -3823,7 +3839,7 @@ class InvisibleUI:
                     if self._shutdown_in_progress or not self.main_frame:
                         return
                         
-                    messenger_window = messenger_webview.show_messenger_webview(self.main_frame)
+                    messenger_window = show_messenger_client(self.main_frame)
                     if messenger_window and not messenger_window.IsBeingDeleted():
                         # Safely bind close event to re-enable Titan UI when webview closes
                         try:
@@ -3927,7 +3943,7 @@ class InvisibleUI:
                 self.speak(_("Cannot open WhatsApp - application not ready"))
                 return
 
-            from src.network import whatsapp_webview
+            from src.network.whatsapp_titan_gui import show_whatsapp_client
             
             # Auto-disable Titan UI when webview opens
             if self.titan_ui_mode:
@@ -3942,7 +3958,7 @@ class InvisibleUI:
                     if self._shutdown_in_progress or not self.main_frame:
                         return
                         
-                    whatsapp_window = whatsapp_webview.show_whatsapp_webview(self.main_frame)
+                    whatsapp_window = show_whatsapp_client(self.main_frame)
                     if whatsapp_window and not whatsapp_window.IsBeingDeleted():
                         # Safely bind close event to re-enable Titan UI when webview closes
                         try:

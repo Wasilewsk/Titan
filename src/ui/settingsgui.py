@@ -148,10 +148,13 @@ def _wx_key_to_string(keycode, modifiers):
 class KeyCaptureDialog(wx.Dialog):
     """Modal dialog that captures the next key combination pressed by the user."""
 
-    def __init__(self, parent, current_label=''):
-        super().__init__(parent, title=_("Capture Titan UI key"),
+    def __init__(self, parent, current_label='', title=None, exclude_bases=None):
+        super().__init__(parent, title=title or _("Capture Titan UI key"),
                          style=wx.DEFAULT_DIALOG_STYLE | wx.RESIZE_BORDER)
         self.captured_key = None
+        # Base keys that may not be captured (e.g. arrows/tab for assistant
+        # hotkeys, so they stay usable for navigation).
+        self._exclude_bases = set(exclude_bases or ())
 
         vbox = wx.BoxSizer(wx.VERTICAL)
 
@@ -210,6 +213,13 @@ class KeyCaptureDialog(wx.Dialog):
         key_string = _wx_key_to_string(keycode, modifiers)
         if key_string is None:
             # Modifier-only press — ignore, wait for the actual key.
+            return
+
+        # Reject excluded base keys (arrows/tab) so they remain free for navigation.
+        base = key_string.split('+')[-1]
+        if base in self._exclude_bases:
+            self.captured_label.SetLabel(
+                _("That key is not allowed here. Please choose another key."))
             return
 
         self.captured_key = key_string
@@ -475,6 +485,7 @@ class SettingsFrame(wx.Frame):
         # Game controller panel is built up-front but only registered as a
         # category while a gamepad is connected (see _sync_controller_category).
         self.controller_panel = wx.Panel(self.content_panel)
+        self.ai_features_panel = wx.Panel(self.content_panel)
 
         # Register categories
         self.register_category(_("General"), self.general_panel)
@@ -484,10 +495,18 @@ class SettingsFrame(wx.Frame):
         self.register_category(_("Environment"), self.environment_panel)
         self.register_category(_("System Monitor"), self.system_monitor_panel)
         self.register_category(_("Titan TTS"), self.stereo_speech_panel)
+        self.register_category(_("AI features"), self.ai_features_panel,
+                               save_callback=self._save_ai_features,
+                               load_callback=self._load_ai_features)
 
         if sys.platform == 'win32':
             self.windows_panel = wx.Panel(self.content_panel)
             self.register_category(_("Windows"), self.windows_panel)
+
+            self.titan_shell_panel = wx.Panel(self.content_panel)
+            self.register_category(_("Titan shell"), self.titan_shell_panel)
+        else:
+            self.titan_shell_panel = None
 
         # Titan-Net category (only if credentials are configured)
         self._titan_net_available = False
@@ -510,9 +529,11 @@ class SettingsFrame(wx.Frame):
         self.InitSystemMonitorPanel()
         self.InitStereoSpeechPanel()
         self.InitControllerPanel()
+        self.InitAIFeaturesPanel()
 
         if sys.platform == 'win32':
             self.InitWindowsPanel()
+            self.InitTitanShellPanel()
 
         if self._titan_net_available:
             self.InitTitanNetPanel()
@@ -761,6 +782,15 @@ class SettingsFrame(wx.Frame):
         self.speech_haptic_sync_cb.Bind(wx.EVT_CHECKBOX, self.OnSpeechHapticSyncChanged)
         vbox.Add(self.speech_haptic_sync_cb, flag=wx.LEFT | wx.TOP, border=10)
 
+        # Gamepad mode persistence. Off by default: Titan then always starts in
+        # system mode, the mode that does not intercept the gamepad.
+        self.remember_gamepad_mode_cb = wx.CheckBox(
+            panel,
+            label=_("Remember the gamepad mode between sessions (otherwise Titan always starts in system mode)"))
+        self.remember_gamepad_mode_cb.Bind(wx.EVT_SET_FOCUS, self.OnFocus)
+        self.remember_gamepad_mode_cb.Bind(wx.EVT_CHECKBOX, self.OnCheckBox)
+        vbox.Add(self.remember_gamepad_mode_cb, flag=wx.LEFT | wx.TOP, border=10)
+
         panel.SetSizer(vbox)
         panel.Layout()
         # This panel is registered as a category manually (see
@@ -862,6 +892,12 @@ class SettingsFrame(wx.Frame):
         self.confirm_exit_cb.Bind(wx.EVT_SET_FOCUS, self.OnFocus)
         self.confirm_exit_cb.Bind(wx.EVT_CHECKBOX, self.OnCheckBox)
         vbox.Add(self.confirm_exit_cb, flag=wx.LEFT | wx.TOP, border=10)
+
+        # Reveals the Programmer menu (AI creation kit and future dev tools).
+        self.developer_tools_cb = wx.CheckBox(self.general_panel, label=_("Enable developer tools"))
+        self.developer_tools_cb.Bind(wx.EVT_SET_FOCUS, self.OnFocus)
+        self.developer_tools_cb.Bind(wx.EVT_CHECKBOX, self.OnCheckBox)
+        vbox.Add(self.developer_tools_cb, flag=wx.LEFT | wx.TOP, border=10)
 
         vbox.AddSpacer(10)
 
@@ -1018,6 +1054,41 @@ class SettingsFrame(wx.Frame):
 
         self.environment_panel.SetSizer(vbox)
 
+    def InitTitanShellPanel(self):
+        """
+        Shortcuts Titan takes over while "Modify system interface" is on.
+
+        The master switch stays under Environment; this panel decides which
+        individual Windows+<key> shortcuts Titan claims from the system.
+        """
+        panel = self.titan_shell_panel
+        vbox = wx.BoxSizer(wx.VERTICAL)
+
+        vbox.Add(wx.StaticText(panel, label=_(
+            "These shortcuts are active only when \"Modify system interface\" "
+            "is enabled under Environment.")), flag=wx.LEFT | wx.TOP, border=10)
+
+        self.shell_binding_cbs = {}
+        try:
+            from src.titan_core.tce_system import SHELL_BINDINGS, get_binding_descriptions
+            descriptions = get_binding_descriptions()
+            for binding_id, _keys, label, default in SHELL_BINDINGS:
+                checkbox = wx.CheckBox(panel, label="{} - {}".format(
+                    label, descriptions.get(binding_id, binding_id)))
+                checkbox.Bind(wx.EVT_SET_FOCUS, self.OnFocus)
+                checkbox.Bind(wx.EVT_CHECKBOX, self.OnCheckBox)
+                vbox.Add(checkbox, flag=wx.LEFT | wx.TOP, border=10)
+                checkbox.shell_default = default
+                self.shell_binding_cbs[binding_id] = checkbox
+        except Exception as e:
+            print(f"[Settings] Could not build the Titan shell panel: {e}")
+
+        vbox.Add(wx.StaticText(panel, label=_(
+            "Windows+L keeps locking the workstation and shortcuts using "
+            "Control are left to Windows.")), flag=wx.LEFT | wx.TOP, border=10)
+
+        panel.SetSizer(vbox)
+
     def InitSystemMonitorPanel(self):
         panel = self.system_monitor_panel
         vbox = wx.BoxSizer(wx.VERTICAL)
@@ -1089,6 +1160,588 @@ class SettingsFrame(wx.Frame):
         vbox.Add(self.battery_critical_choice, flag=wx.LEFT | wx.EXPAND, border=10)
 
         panel.SetSizer(vbox)
+
+    def InitAIFeaturesPanel(self):
+        """AI features category: master enable, communication method (API key /
+        Claude CLI / Codex CLI) and, for the API method, provider + encrypted
+        API key. Powers the developer AI creation kit (Programmer menu)."""
+        from src.ai import ai_provider as ap
+        panel = self.ai_features_panel
+        vbox = wx.BoxSizer(wx.VERTICAL)
+
+        intro = wx.StaticText(panel, label=_(
+            "Enable AI components to generate apps, games, components and other "
+            "add-ons with the AI creation kit (Programmer menu)."))
+        intro.Wrap(720)
+        vbox.Add(intro, flag=wx.LEFT | wx.TOP | wx.RIGHT, border=10)
+
+        self.ai_enable_cb = wx.CheckBox(panel, label=_("Enable AI components"))
+        self.ai_enable_cb.Bind(wx.EVT_SET_FOCUS, self.OnFocus)
+        self.ai_enable_cb.Bind(wx.EVT_CHECKBOX, self._on_ai_state_change)
+        vbox.Add(self.ai_enable_cb, flag=wx.LEFT | wx.TOP, border=10)
+
+        # Every control below depends on the master switch: like the Titan TTS
+        # panel, they are HIDDEN entirely (not just disabled) while AI is off, and
+        # shown/hidden live as the checkbox is toggled. Collected here so
+        # _update_ai_controls_state can flip them all at once.
+        self._ai_dependent_ctrls = []
+
+        def _dep(ctrl):
+            self._ai_dependent_ctrls.append(ctrl)
+            return ctrl
+
+        # Communication method
+        self._ai_methods = list(ap.METHODS)  # [(id, label), ...]
+        self.ai_method_radio = wx.RadioBox(
+            panel, label=_("Communication method"),
+            choices=[_("API key"), _("Claude CLI"), _("Codex CLI")],
+            majorDimension=1, style=wx.RA_SPECIFY_COLS)
+        self.ai_method_radio.Bind(wx.EVT_SET_FOCUS, self.OnFocus)
+        self.ai_method_radio.Bind(wx.EVT_RADIOBOX, self._on_ai_state_change)
+        vbox.Add(_dep(self.ai_method_radio), flag=wx.LEFT | wx.TOP | wx.EXPAND, border=10)
+
+        # --- API-key subsection (shown only when the API method is chosen) --- #
+        self.ai_provider_label = wx.StaticText(panel, label=_("AI provider:"))
+        vbox.Add(_dep(self.ai_provider_label), flag=wx.LEFT | wx.TOP, border=10)
+        self._ai_providers = list(ap.PROVIDERS)  # [(id, label), ...]
+        self.ai_provider_choice = wx.Choice(
+            panel, choices=[label for _pid, label in self._ai_providers])
+        self.ai_provider_choice.Bind(wx.EVT_SET_FOCUS, self.OnFocus)
+        self.ai_provider_choice.Bind(wx.EVT_CHOICE, self._on_ai_provider_change)
+        vbox.Add(_dep(self.ai_provider_choice), flag=wx.LEFT | wx.EXPAND, border=10)
+
+        self.ai_key_label = wx.StaticText(
+            panel, label=_("API key (stored encrypted on this device):"))
+        vbox.Add(_dep(self.ai_key_label), flag=wx.LEFT | wx.TOP, border=10)
+        self.ai_key_ctrl = wx.TextCtrl(panel, style=wx.TE_PASSWORD)
+        self.ai_key_ctrl.SetName(_("API key"))
+        self.ai_key_ctrl.Bind(wx.EVT_SET_FOCUS, self.OnFocus)
+        vbox.Add(_dep(self.ai_key_ctrl), flag=wx.LEFT | wx.RIGHT | wx.EXPAND, border=10)
+
+        # AI Agent confirmation policy (how the computer-use agent asks before
+        # acting). Separate from the creation kit.
+        self._ai_agent_confirm_values = ['tiered', 'all', 'none']
+        self.ai_agent_confirm_radio = wx.RadioBox(
+            panel, label=_("AI Agent confirmations"),
+            choices=[_("Confirm risky actions (recommended)"),
+                     _("Confirm every action"),
+                     _("Autonomous (no confirmations)")],
+            majorDimension=1, style=wx.RA_SPECIFY_COLS)
+        self.ai_agent_confirm_radio.Bind(wx.EVT_SET_FOCUS, self.OnFocus)
+        vbox.Add(_dep(self.ai_agent_confirm_radio), flag=wx.LEFT | wx.TOP | wx.EXPAND, border=10)
+
+        # --- What the AI may reach ---------------------------------------- #
+        # Add-ons declare their own functions (the Titan Action API), so the
+        # list below is built from what is actually installed rather than from
+        # anything hard-coded here.
+        vbox.Add(_dep(wx.StaticLine(panel)), flag=wx.EXPAND | wx.LEFT | wx.RIGHT | wx.TOP, border=10)
+        reach_header = wx.StaticText(panel, label=_("What the AI may reach"))
+        vbox.Add(_dep(reach_header), flag=wx.LEFT | wx.TOP, border=10)
+
+        self.ai_addon_actions_cb = wx.CheckBox(panel, label=_(
+            "Let the AI use the functions add-ons offer"))
+        self.ai_addon_actions_cb.SetName(_("Let the AI use the functions add-ons offer"))
+        self.ai_addon_actions_cb.Bind(wx.EVT_SET_FOCUS, self.OnFocus)
+        self.ai_addon_actions_cb.Bind(wx.EVT_CHECKBOX, self.OnCheckBox)
+        vbox.Add(_dep(self.ai_addon_actions_cb), flag=wx.LEFT | wx.TOP, border=10)
+
+        addons_label = wx.StaticText(panel, label=_(
+            "Add-ons the AI may drive (untick to exclude one):"))
+        vbox.Add(_dep(addons_label), flag=wx.LEFT | wx.TOP, border=10)
+        self._ai_addon_ids = []
+        self.ai_addon_list = wx.CheckListBox(panel, choices=[])
+        self.ai_addon_list.SetName(_("Add-ons the AI may drive"))
+        self.ai_addon_list.Bind(wx.EVT_SET_FOCUS, self.OnFocus)
+        vbox.Add(_dep(self.ai_addon_list), flag=wx.LEFT | wx.RIGHT | wx.EXPAND, border=10)
+
+        # --- Memory -------------------------------------------------------- #
+        memory_header = wx.StaticText(panel, label=_("Memory"))
+        vbox.Add(_dep(memory_header), flag=wx.LEFT | wx.TOP, border=10)
+
+        self.ai_memory_cb = wx.CheckBox(panel, label=_(
+            "Remember earlier conversations"))
+        self.ai_memory_cb.SetName(_("Remember earlier conversations"))
+        self.ai_memory_cb.Bind(wx.EVT_SET_FOCUS, self.OnFocus)
+        self.ai_memory_cb.Bind(wx.EVT_CHECKBOX, self.OnCheckBox)
+        vbox.Add(_dep(self.ai_memory_cb), flag=wx.LEFT | wx.TOP, border=10)
+
+        memory_turns_label = wx.StaticText(panel, label=_(
+            "How many earlier exchanges to carry into a new one:"))
+        vbox.Add(_dep(memory_turns_label), flag=wx.LEFT | wx.TOP, border=10)
+        self.ai_memory_turns = wx.SpinCtrl(panel, min=0, max=100, initial=20)
+        self.ai_memory_turns.SetName(_("Earlier exchanges to remember"))
+        self.ai_memory_turns.Bind(wx.EVT_SET_FOCUS, self.OnFocus)
+        vbox.Add(_dep(self.ai_memory_turns), flag=wx.LEFT, border=10)
+
+        self.ai_memory_forget_btn = wx.Button(panel, label=_(
+            "Forget the conversation so far"))
+        self.ai_memory_forget_btn.Bind(wx.EVT_SET_FOCUS, self.OnFocus)
+        self.ai_memory_forget_btn.Bind(wx.EVT_BUTTON, self._on_ai_memory_forget)
+        vbox.Add(_dep(self.ai_memory_forget_btn), flag=wx.LEFT | wx.TOP, border=10)
+
+        # --- Voice assistant (Perun / Melitele) --------------------------- #
+        vbox.Add(_dep(wx.StaticLine(panel)), flag=wx.EXPAND | wx.LEFT | wx.RIGHT | wx.TOP, border=10)
+        assistant_header = wx.StaticText(panel, label=_("Voice assistant"))
+        vbox.Add(_dep(assistant_header), flag=wx.LEFT | wx.TOP, border=10)
+
+        # Text-to-speech engine: Automatic (follows the API key that is really
+        # configured), the cloud providers that actually offer a TTS API (Gemini,
+        # OpenAI - Claude has none, so it isn't listed), plus Titan TTS.
+        self._assistant_tts_values = [v for v, _l in ap.assistant_tts_options()]
+        # Only the 'Automatic' entry is prose worth translating; the rest are
+        # product names (Gemini TTS, OpenAI TTS, Titan TTS).
+        _tts_labels = {'auto': _("Automatic (match the API key you configured)")}
+        self.assistant_tts_radio = wx.RadioBox(
+            panel, label=_("Assistant voice (text to speech)"),
+            choices=[_tts_labels.get(value, label)
+                     for value, label in ap.assistant_tts_options()],
+            majorDimension=1, style=wx.RA_SPECIFY_COLS)
+        self.assistant_tts_radio.Bind(wx.EVT_SET_FOCUS, self.OnFocus)
+        vbox.Add(_dep(self.assistant_tts_radio), flag=wx.LEFT | wx.TOP | wx.EXPAND, border=10)
+
+        assistant_model_label = wx.StaticText(panel, label=_("Assistant model:"))
+        vbox.Add(_dep(assistant_model_label), flag=wx.LEFT | wx.TOP, border=10)
+        self._assistant_personas = []
+        try:
+            from src.ai.assistant import personas as _personas
+            self._assistant_personas = _personas.list_personas()
+        except Exception as e:
+            print(f"[settings] could not list assistant personas: {e}")
+        choices = [p['name_en'] for p in self._assistant_personas] or [_("(none installed)")]
+        self.assistant_model_choice = wx.Choice(panel, choices=choices)
+        self.assistant_model_choice.Bind(wx.EVT_SET_FOCUS, self.OnFocus)
+        vbox.Add(_dep(self.assistant_model_choice), flag=wx.LEFT | wx.EXPAND, border=10)
+
+        # Global assistant hotkey (works anywhere).
+        self._assistant_hotkey_value = ''
+        assistant_hotkey_label = wx.StaticText(panel, label=_(
+            "Global assistant shortcut (arrows and Tab are not allowed):"))
+        vbox.Add(_dep(assistant_hotkey_label), flag=wx.LEFT | wx.TOP, border=10)
+        self.assistant_hotkey_btn = wx.Button(
+            panel, label=self._assistant_hotkey_label(False, ''))
+        self.assistant_hotkey_btn.SetName(_("Global assistant shortcut"))
+        self.assistant_hotkey_btn.Bind(wx.EVT_SET_FOCUS, self.OnFocus)
+        self.assistant_hotkey_btn.Bind(
+            wx.EVT_BUTTON, lambda e: self._capture_assistant_hotkey(False))
+        vbox.Add(_dep(self.assistant_hotkey_btn), flag=wx.LEFT | wx.TOP, border=10)
+
+        # Titan UI assistant hotkey (only active while Titan UI is on).
+        self._assistant_titan_hotkey_value = ''
+        assistant_titan_hotkey_label = wx.StaticText(panel, label=_(
+            "Titan UI assistant shortcut (active only in Titan UI; arrows and "
+            "Tab are not allowed):"))
+        vbox.Add(_dep(assistant_titan_hotkey_label), flag=wx.LEFT | wx.TOP, border=10)
+        self.assistant_titan_hotkey_btn = wx.Button(
+            panel, label=self._assistant_hotkey_label(True, ''))
+        self.assistant_titan_hotkey_btn.SetName(_("Titan UI assistant shortcut"))
+        self.assistant_titan_hotkey_btn.Bind(wx.EVT_SET_FOCUS, self.OnFocus)
+        self.assistant_titan_hotkey_btn.Bind(
+            wx.EVT_BUTTON, lambda e: self._capture_assistant_hotkey(True))
+        vbox.Add(_dep(self.assistant_titan_hotkey_btn), flag=wx.LEFT | wx.TOP, border=10)
+
+        # Dictation: pressing an assistant hotkey while a text field is focused
+        # types what you say into that field instead of running a command.
+        self.assistant_dictation_cb = wx.CheckBox(panel, label=_(
+            "Dictate into text fields (an assistant shortcut pressed while a text "
+            "field is focused types what you say into it)"))
+        self.assistant_dictation_cb.Bind(wx.EVT_SET_FOCUS, self.OnFocus)
+        vbox.Add(_dep(self.assistant_dictation_cb), flag=wx.LEFT | wx.TOP, border=10)
+
+        # Automatic reminder announcements: Titan reads due tReminder reminders
+        # out itself, so they reach the user even with tReminder closed.
+        self._reminder_announce_values = ['voice', 'text', 'off']
+        self.reminder_announce_radio = wx.RadioBox(
+            panel, label=_("Announce reminders automatically"),
+            choices=[_("Speak them in the assistant's voice"),
+                     _("Read them as a text notification"),
+                     _("Do not announce them")],
+            majorDimension=1, style=wx.RA_SPECIFY_COLS)
+        self.reminder_announce_radio.Bind(wx.EVT_SET_FOCUS, self.OnFocus)
+        vbox.Add(_dep(self.reminder_announce_radio), flag=wx.LEFT | wx.TOP | wx.EXPAND, border=10)
+
+        self.reminder_ai_phrasing_cb = wx.CheckBox(panel, label=_(
+            "Let the AI word the reminder announcement in the assistant's own "
+            "style (a fixed wording is used otherwise)"))
+        self.reminder_ai_phrasing_cb.Bind(wx.EVT_SET_FOCUS, self.OnFocus)
+        vbox.Add(_dep(self.reminder_ai_phrasing_cb), flag=wx.LEFT | wx.TOP, border=10)
+
+        # ---------------------------------------------------------------- #
+        # AI OCR: an accessible stand-in for a program that has none.
+        # ---------------------------------------------------------------- #
+        vbox.Add(wx.StaticText(panel, label=_("AI OCR (reading a screen that a "
+                                              "screen reader cannot)")),
+                 flag=wx.LEFT | wx.TOP, border=10)
+
+        self.ocr_enabled_cb = wx.CheckBox(panel, label=_(
+            "Enable AI OCR (a scan sends a picture of the window to the AI "
+            "provider you configured above)"))
+        self.ocr_enabled_cb.Bind(wx.EVT_SET_FOCUS, self.OnFocus)
+        self.ocr_enabled_cb.Bind(wx.EVT_CHECKBOX, self.OnCheckBox)
+        vbox.Add(_dep(self.ocr_enabled_cb), flag=wx.LEFT | wx.TOP, border=10)
+
+        self._ocr_scopes = list(ap.OCR_SCOPES)
+        self.ocr_scope_radio = wx.RadioBox(
+            panel, label=_("What a scan looks at"),
+            choices=[_("The window in front (recommended)"),
+                     _("The whole screen")],
+            majorDimension=1, style=wx.RA_SPECIFY_COLS)
+        self.ocr_scope_radio.Bind(wx.EVT_SET_FOCUS, self.OnFocus)
+        vbox.Add(_dep(self.ocr_scope_radio), flag=wx.LEFT | wx.TOP | wx.EXPAND, border=10)
+
+        self._ocr_views = list(ap.OCR_VIEWS)
+        self.ocr_view_radio = wx.RadioBox(
+            panel, label=_("Where the controls appear"),
+            choices=[_("On the real window itself, control by control "
+                       "(recommended)"),
+                     _("In a Titan window, as a list to read")],
+            majorDimension=1, style=wx.RA_SPECIFY_COLS)
+        self.ocr_view_radio.Bind(wx.EVT_SET_FOCUS, self.OnFocus)
+        vbox.Add(_dep(self.ocr_view_radio), flag=wx.LEFT | wx.TOP | wx.EXPAND,
+                 border=10)
+
+        # Global AI OCR hotkey.
+        self._ocr_hotkey_value = ''
+        vbox.Add(_dep(wx.StaticText(panel, label=_(
+            "Global AI OCR shortcut (arrows and Tab are not allowed):"))),
+            flag=wx.LEFT | wx.TOP, border=10)
+        self.ocr_hotkey_btn = wx.Button(panel, label=self._ocr_hotkey_label(False, ''))
+        self.ocr_hotkey_btn.SetName(_("Global AI OCR shortcut"))
+        self.ocr_hotkey_btn.Bind(wx.EVT_SET_FOCUS, self.OnFocus)
+        self.ocr_hotkey_btn.Bind(wx.EVT_BUTTON,
+                                 lambda e: self._capture_ocr_hotkey(False))
+        vbox.Add(_dep(self.ocr_hotkey_btn), flag=wx.LEFT | wx.TOP, border=10)
+
+        # Titan UI AI OCR hotkey - the one the feature was asked for.
+        self._ocr_titan_hotkey_value = ''
+        vbox.Add(_dep(wx.StaticText(panel, label=_(
+            "Titan UI AI OCR shortcut (active only in Titan UI; arrows and Tab "
+            "are not allowed):"))), flag=wx.LEFT | wx.TOP, border=10)
+        self.ocr_titan_hotkey_btn = wx.Button(
+            panel, label=self._ocr_hotkey_label(True, ''))
+        self.ocr_titan_hotkey_btn.SetName(_("Titan UI AI OCR shortcut"))
+        self.ocr_titan_hotkey_btn.Bind(wx.EVT_SET_FOCUS, self.OnFocus)
+        self.ocr_titan_hotkey_btn.Bind(wx.EVT_BUTTON,
+                                       lambda e: self._capture_ocr_hotkey(True))
+        vbox.Add(_dep(self.ocr_titan_hotkey_btn), flag=wx.LEFT | wx.TOP, border=10)
+
+        self.ocr_can_act_cb = wx.CheckBox(panel, label=_(
+            "Let AI OCR press controls (Enter on an entry clicks it in the real "
+            "program; with this off the screen is only read out)"))
+        self.ocr_can_act_cb.Bind(wx.EVT_SET_FOCUS, self.OnFocus)
+        vbox.Add(_dep(self.ocr_can_act_cb), flag=wx.LEFT | wx.TOP, border=10)
+
+        self.ocr_use_uia_cb = wx.CheckBox(panel, label=_(
+            "Check what the AI read against Windows itself (more exact "
+            "positions and states where the program exposes any)"))
+        self.ocr_use_uia_cb.Bind(wx.EVT_SET_FOCUS, self.OnFocus)
+        vbox.Add(_dep(self.ocr_use_uia_cb), flag=wx.LEFT | wx.TOP, border=10)
+
+        vbox.Add(_dep(wx.StaticText(panel, label=_(
+            "Re-read a watched screen every (seconds, 0 = only when I ask):"))),
+            flag=wx.LEFT | wx.TOP, border=10)
+        self.ocr_live_spin = wx.SpinCtrl(panel, min=0, max=600, initial=0)
+        self.ocr_live_spin.Bind(wx.EVT_SET_FOCUS, self.OnFocus)
+        vbox.Add(_dep(self.ocr_live_spin), flag=wx.LEFT | wx.TOP | wx.BOTTOM, border=10)
+
+        # In-memory per-provider keys (decrypted), swapped as the provider
+        # choice changes; persisted (re-encrypted) only on Save.
+        self._ai_keys = {}
+        self._ai_current_provider = self._ai_providers[0][0]
+
+        panel.SetSizer(vbox)
+        panel.Layout()
+
+    def _assistant_hotkey_label(self, titan_ui, value):
+        """Descriptive button label so a screen reader announces WHICH shortcut it
+        is, not just the bare key (e.g. 'Titan UI assistant shortcut: F3')."""
+        base = (_("Titan UI assistant shortcut") if titan_ui
+                else _("Global assistant shortcut"))
+        return "{name}: {key}".format(name=base, key=value or _("Not set"))
+
+    def _ocr_hotkey_label(self, titan_ui, value):
+        """Same descriptive labelling as the assistant shortcuts, so a screen
+        reader announces which shortcut a button is, not just its key."""
+        base = (_("Titan UI AI OCR shortcut") if titan_ui
+                else _("Global AI OCR shortcut"))
+        return "{name}: {key}".format(name=base, key=value or _("Not set"))
+
+    def _capture_ocr_hotkey(self, titan_ui):
+        """Open a key-capture dialog for an AI OCR shortcut (no arrows/Tab)."""
+        current = (self._ocr_titan_hotkey_value if titan_ui
+                   else self._ocr_hotkey_value)
+        dlg = KeyCaptureDialog(
+            self, current_label=current,
+            title=_("Capture AI OCR shortcut"),
+            exclude_bases={'tab', 'up', 'down', 'left', 'right'})
+        if dlg.ShowModal() == wx.ID_OK and dlg.captured_key:
+            if titan_ui:
+                self._ocr_titan_hotkey_value = dlg.captured_key
+                self.ocr_titan_hotkey_btn.SetLabel(
+                    self._ocr_hotkey_label(True, dlg.captured_key))
+            else:
+                self._ocr_hotkey_value = dlg.captured_key
+                self.ocr_hotkey_btn.SetLabel(
+                    self._ocr_hotkey_label(False, dlg.captured_key))
+        dlg.Destroy()
+
+    def _capture_assistant_hotkey(self, titan_ui):
+        """Open a key-capture dialog for an assistant shortcut (no arrows/Tab)."""
+        current = (self._assistant_titan_hotkey_value if titan_ui
+                   else self._assistant_hotkey_value)
+        dlg = KeyCaptureDialog(
+            self, current_label=current,
+            title=_("Capture assistant shortcut"),
+            exclude_bases={'tab', 'up', 'down', 'left', 'right'})
+        if dlg.ShowModal() == wx.ID_OK and dlg.captured_key:
+            if titan_ui:
+                self._assistant_titan_hotkey_value = dlg.captured_key
+                self.assistant_titan_hotkey_btn.SetLabel(
+                    self._assistant_hotkey_label(True, dlg.captured_key))
+            else:
+                self._assistant_hotkey_value = dlg.captured_key
+                self.assistant_hotkey_btn.SetLabel(
+                    self._assistant_hotkey_label(False, dlg.captured_key))
+        dlg.Destroy()
+
+    def _current_ai_method(self):
+        idx = self.ai_method_radio.GetSelection()
+        return self._ai_methods[idx][0] if idx >= 0 else 'api'
+
+    def _current_ai_provider(self):
+        idx = self.ai_provider_choice.GetSelection()
+        return self._ai_providers[idx][0] if idx >= 0 else self._ai_providers[0][0]
+
+    def _update_ai_controls_state(self):
+        """Show/hide the AI settings to reflect the master switch (like the Titan
+        TTS panel: everything but the enable checkbox disappears while AI is off),
+        and within that, reveal the API provider/key only for the API method.
+        Re-lays out the panel so the change is immediate."""
+        enabled = self.ai_enable_cb.GetValue()
+        for ctrl in self._ai_dependent_ctrls:
+            ctrl.Show(enabled)
+        # The API-key subsection only makes sense for the 'API key' method.
+        if enabled:
+            api = self._current_ai_method() == 'api'
+            for ctrl in (self.ai_provider_label, self.ai_provider_choice,
+                         self.ai_key_label, self.ai_key_ctrl):
+                ctrl.Show(api)
+        self.ai_features_panel.Layout()
+        # Refresh the scroll region so the shorter/taller panel doesn't leave a
+        # dead scroll area or clip controls.
+        try:
+            self.content_panel.Layout()
+            self.content_panel.FitInside()
+        except Exception:
+            pass
+
+    def _on_ai_state_change(self, event):
+        self._update_ai_controls_state()
+        if event:
+            event.Skip()
+
+    def _on_ai_provider_change(self, event):
+        # Stash the key currently in the field under the old provider, then load
+        # the newly selected provider's key.
+        self._ai_keys[self._ai_current_provider] = self.ai_key_ctrl.GetValue()
+        provider = self._current_ai_provider()
+        self._ai_current_provider = provider
+        self.ai_key_ctrl.SetValue(self._ai_keys.get(provider, ''))
+        if event:
+            event.Skip()
+
+    def _load_ai_reach_and_memory(self):
+        """Fill in the add-on permission list and the memory controls.
+
+        The list is built from the add-ons that actually declare actions, so a
+        newly installed add-on appears here without any change to this file.
+        """
+        from src.settings.settings import get_setting
+
+        def _flag(key, default):
+            value = get_setting(key, default, section='ai')
+            return str(value).strip().lower() not in ('0', 'false', 'no', 'off')
+
+        self.ai_addon_actions_cb.SetValue(_flag('addon_actions', True))
+        self.ai_memory_cb.SetValue(_flag('memory_enabled', True))
+        try:
+            self.ai_memory_turns.SetValue(
+                int(get_setting('memory_turns', 20, section='ai')))
+        except (TypeError, ValueError):
+            self.ai_memory_turns.SetValue(20)
+
+        blocked = str(get_setting('addon_actions_blocked', '', section='ai') or '')
+        blocked_ids = {part.strip().lower()
+                       for part in blocked.replace(';', ',').split(',')
+                       if part.strip()}
+        entries = []
+        try:
+            from src.titan_core import actions as core_actions
+            # Titan's own subsystems are not listed: they are governed by their
+            # own settings (AI OCR's switch, Titan-Net's, and the master one
+            # above), not by a per-add-on tick box.
+            entries = [entry for entry in core_actions.list_addons()
+                       if not entry.get('builtin')]
+        except Exception as e:
+            print(f"[settings] could not list add-on actions: {e}")
+        self._ai_addon_ids = [entry['id'] for entry in entries]
+        labels = [f"{entry['label']} ({entry['kind_label']}) - "
+                  + _("{count} functions").format(count=len(entry['actions']))
+                  for entry in entries]
+        self.ai_addon_list.Set(labels)
+        for index, addon_id in enumerate(self._ai_addon_ids):
+            self.ai_addon_list.Check(index, addon_id not in blocked_ids)
+
+    def _on_ai_memory_forget(self, event):
+        """Throw away the remembered conversation. Notes are kept: the user
+        asked for those deliberately, and losing them to a button labelled
+        'forget the conversation' would be a surprise."""
+        answer = wx.MessageBox(
+            _("Forget everything the AI remembers of your conversations so "
+              "far? Facts you asked it to remember are kept."),
+            _("Forget the conversation"), wx.YES_NO | wx.ICON_QUESTION, self)
+        if answer != wx.YES:
+            return
+        try:
+            from src.ai import memory
+            message = memory.clear_conversation()
+        except Exception as e:
+            message = _("Could not clear the memory: {error}").format(error=e)
+        wx.MessageBox(message, _("Memory"), wx.OK | wx.ICON_INFORMATION, self)
+
+    def _load_ai_features(self, panel):
+        from src.ai import ai_provider as ap
+        self.ai_enable_cb.SetValue(ap.is_ai_enabled())
+        method = ap.get_ai_method()
+        method_ids = [mid for mid, _l in self._ai_methods]
+        self.ai_method_radio.SetSelection(method_ids.index(method) if method in method_ids else 0)
+        provider = ap.get_ai_provider()
+        provider_ids = [pid for pid, _l in self._ai_providers]
+        self.ai_provider_choice.SetSelection(provider_ids.index(provider) if provider in provider_ids else 0)
+        self._ai_keys = {pid: ap.get_ai_key(pid) for pid, _l in self._ai_providers}
+        self._ai_current_provider = self._current_ai_provider()
+        self.ai_key_ctrl.SetValue(self._ai_keys.get(self._ai_current_provider, ''))
+        policy = ap.get_agent_confirm()
+        self.ai_agent_confirm_radio.SetSelection(
+            self._ai_agent_confirm_values.index(policy)
+            if policy in self._ai_agent_confirm_values else 0)
+        # Voice assistant
+        if self._assistant_personas:
+            model = ap.get_assistant_model()
+            ids = [p['id'] for p in self._assistant_personas]
+            self.assistant_model_choice.SetSelection(
+                ids.index(model) if model in ids else 0)
+        self._assistant_hotkey_value = ap.get_assistant_hotkey()
+        self.assistant_hotkey_btn.SetLabel(
+            self._assistant_hotkey_label(False, self._assistant_hotkey_value))
+        self._assistant_titan_hotkey_value = ap.get_assistant_titan_hotkey()
+        self.assistant_titan_hotkey_btn.SetLabel(
+            self._assistant_hotkey_label(True, self._assistant_titan_hotkey_value))
+        self.assistant_dictation_cb.SetValue(ap.get_assistant_dictation())
+        tts = ap.get_assistant_tts()
+        self.assistant_tts_radio.SetSelection(
+            self._assistant_tts_values.index(tts)
+            if tts in self._assistant_tts_values else 0)
+        announce = ap.get_reminder_announce()
+        self.reminder_announce_radio.SetSelection(
+            self._reminder_announce_values.index(announce)
+            if announce in self._reminder_announce_values else 0)
+        self.reminder_ai_phrasing_cb.SetValue(ap.get_reminder_ai_phrasing())
+
+        self._load_ai_reach_and_memory()
+
+        # AI OCR
+        self.ocr_enabled_cb.SetValue(ap.get_ocr_enabled())
+        scope = ap.get_ocr_scope()
+        scope_ids = [sid for sid, _label in self._ocr_scopes]
+        self.ocr_scope_radio.SetSelection(
+            scope_ids.index(scope) if scope in scope_ids else 0)
+        view = ap.get_ocr_open_as()
+        view_ids = [vid for vid, _label in self._ocr_views]
+        self.ocr_view_radio.SetSelection(
+            view_ids.index(view) if view in view_ids else 0)
+        self._ocr_hotkey_value = ap.get_ocr_hotkey()
+        self.ocr_hotkey_btn.SetLabel(
+            self._ocr_hotkey_label(False, self._ocr_hotkey_value))
+        self._ocr_titan_hotkey_value = ap.get_ocr_titan_hotkey()
+        self.ocr_titan_hotkey_btn.SetLabel(
+            self._ocr_hotkey_label(True, self._ocr_titan_hotkey_value))
+        self.ocr_can_act_cb.SetValue(ap.get_ocr_can_act())
+        self.ocr_use_uia_cb.SetValue(ap.get_ocr_use_uia())
+        self.ocr_live_spin.SetValue(ap.get_ocr_live_seconds())
+
+        self._update_ai_controls_state()
+
+    def _save_ai_features(self, panel):
+        from src.ai import ai_provider as ap
+        # Capture the visible field into the per-provider map before persisting.
+        self._ai_keys[self._ai_current_provider] = self.ai_key_ctrl.GetValue()
+        ap.set_ai_enabled(self.ai_enable_cb.GetValue())
+        ap.set_ai_method(self._current_ai_method())
+        ap.set_ai_provider(self._current_ai_provider())
+        for pid, key in self._ai_keys.items():
+            ap.set_ai_key(pid, (key or '').strip())
+        try:
+            ap.set_agent_confirm(
+                self._ai_agent_confirm_values[self.ai_agent_confirm_radio.GetSelection()])
+        except Exception:
+            pass
+        # What the AI may reach, and what it remembers.
+        try:
+            from src.settings.settings import set_setting
+            set_setting('addon_actions', self.ai_addon_actions_cb.GetValue(),
+                        section='ai')
+            blocked = [addon_id for index, addon_id
+                       in enumerate(self._ai_addon_ids)
+                       if not self.ai_addon_list.IsChecked(index)]
+            set_setting('addon_actions_blocked', ",".join(blocked), section='ai')
+            set_setting('memory_enabled', self.ai_memory_cb.GetValue(),
+                        section='ai')
+            set_setting('memory_turns', self.ai_memory_turns.GetValue(),
+                        section='ai')
+        except Exception as e:
+            print(f"[settings] could not save the AI access settings: {e}")
+        # Voice assistant
+        try:
+            if self._assistant_personas:
+                idx = self.assistant_model_choice.GetSelection()
+                if 0 <= idx < len(self._assistant_personas):
+                    ap.set_assistant_model(self._assistant_personas[idx]['id'])
+            ap.set_assistant_hotkey(self._assistant_hotkey_value)
+            ap.set_assistant_titan_hotkey(self._assistant_titan_hotkey_value)
+            ap.set_assistant_dictation(self.assistant_dictation_cb.GetValue())
+            sel = self.assistant_tts_radio.GetSelection()
+            if 0 <= sel < len(self._assistant_tts_values):
+                ap.set_assistant_tts(self._assistant_tts_values[sel])
+            sel = self.reminder_announce_radio.GetSelection()
+            if 0 <= sel < len(self._reminder_announce_values):
+                ap.set_reminder_announce(self._reminder_announce_values[sel])
+            ap.set_reminder_ai_phrasing(self.reminder_ai_phrasing_cb.GetValue())
+            # AI OCR
+            ap.set_ocr_enabled(self.ocr_enabled_cb.GetValue())
+            sel = self.ocr_scope_radio.GetSelection()
+            if 0 <= sel < len(self._ocr_scopes):
+                ap.set_ocr_scope(self._ocr_scopes[sel][0])
+            sel = self.ocr_view_radio.GetSelection()
+            if 0 <= sel < len(self._ocr_views):
+                ap.set_ocr_open_as(self._ocr_views[sel][0])
+            ap.set_ocr_hotkey(self._ocr_hotkey_value)
+            ap.set_ocr_titan_hotkey(self._ocr_titan_hotkey_value)
+            ap.set_ocr_can_act(self.ocr_can_act_cb.GetValue())
+            ap.set_ocr_use_uia(self.ocr_use_uia_cb.GetValue())
+            ap.set_ocr_live_seconds(self.ocr_live_spin.GetValue())
+            # Re-register the global hotkeys so changes take effect immediately.
+            from src.ai.assistant import hotkeys as _assistant_hotkeys
+            _assistant_hotkeys.register()
+            from src.ai.ocr import hotkeys as _ocr_hotkeys
+            _ocr_hotkeys.register()
+            # Start/stop the automatic reminder announcer to match the new mode.
+            from src.ai.assistant import reminder_watcher
+            reminder_watcher.refresh()
+            # Re-read the AI settings buffer so it reports the saved state.
+            from src.buffers import ai_buffer
+            ai_buffer.refresh_settings()
+        except Exception as e:
+            print(f"[settings] saving assistant settings failed: {e}")
 
     def InitWindowsPanel(self):
         panel = self.windows_panel
@@ -1267,8 +1920,36 @@ class SettingsFrame(wx.Frame):
         self.notify_chat_msg_cb.Bind(wx.EVT_CHECKBOX, self.OnCheckBox)
         vbox.Add(self.notify_chat_msg_cb, flag=wx.LEFT | wx.TOP, border=10)
 
+        vbox.AddSpacer(15)
+
+        # Sounds the SERVER plays on this machine (moderator announcements,
+        # component alerts). On by default, but nobody has to accept audio
+        # from a remote server if they would rather not.
+        self.server_sounds_cb = wx.CheckBox(panel, label=_("Allow sounds sent by the server"))
+        self.server_sounds_cb.Bind(wx.EVT_SET_FOCUS, self.OnFocus)
+        self.server_sounds_cb.Bind(wx.EVT_CHECKBOX, self.OnCheckBox)
+        vbox.Add(self.server_sounds_cb, flag=wx.LEFT | wx.TOP, border=10)
+
+        self.clear_sound_cache_btn = wx.Button(panel, label=_("Clear downloaded server sounds"))
+        self.clear_sound_cache_btn.Bind(wx.EVT_BUTTON, self.OnClearServerSoundCache)
+        self.clear_sound_cache_btn.Bind(wx.EVT_SET_FOCUS, self.OnFocus)
+        vbox.Add(self.clear_sound_cache_btn, flag=wx.LEFT | wx.TOP, border=10)
+
         panel.SetSizer(vbox)
         panel.Layout()
+
+    def OnClearServerSoundCache(self, event):
+        """Throw away every server sound cached on this machine."""
+        try:
+            from src.network import server_sounds
+            removed = server_sounds.clear_cache()
+        except Exception as e:
+            print(f"[SettingsFrame] Could not clear server sound cache: {e}")
+            return
+        play_sound('ui/switch_category.ogg')
+        _show_skinned_message(
+            _("Removed {n} cached sounds.").format(n=removed),
+            _("Server sounds"), wx.OK | wx.ICON_INFORMATION, self)
 
     def OnBusinessCardToggle(self, event):
         """Enable/disable business card controls."""
@@ -1451,6 +2132,8 @@ class SettingsFrame(wx.Frame):
         self.haptic_strength_slider.SetValue(max(0, min(100, strength_pct)))
         speech_haptic_value = controller_settings.get('speech_haptic_sync', 'False')
         self.speech_haptic_sync_cb.SetValue(str(speech_haptic_value).lower() in ['true', '1'])
+        remember_mode_value = controller_settings.get('remember_mode', 'False')
+        self.remember_gamepad_mode_cb.SetValue(str(remember_mode_value).lower() in ['true', '1'])
 
         general_settings = self.settings.get('general', {})
         quick_start_value = general_settings.get('quick_start', 'False')
@@ -1458,6 +2141,9 @@ class SettingsFrame(wx.Frame):
 
         confirm_exit_value = general_settings.get('confirm_exit', 'False')
         self.confirm_exit_cb.SetValue(str(confirm_exit_value).lower() in ['true', '1'])
+
+        developer_tools_value = general_settings.get('developer_tools', 'False')
+        self.developer_tools_cb.SetValue(str(developer_tools_value).lower() in ['true', '1'])
 
         startup_mode_value = general_settings.get('startup_mode', 'normal')
         if startup_mode_value == 'minimized':
@@ -1514,7 +2200,10 @@ class SettingsFrame(wx.Frame):
         self.general_panel.Layout()
 
         interface_settings = self.settings.get('interface', {})
-        current_skin = interface_settings.get('skin', 'Domyślna')
+        current_skin = interface_settings.get('skin', _('Default'))
+        # Also accept legacy Polish skin name
+        if current_skin == 'Domyślna':
+            current_skin = _('Default')
         if self.skin_choice.FindString(current_skin) != wx.NOT_FOUND:
              self.skin_choice.SetStringSelection(current_skin)
         elif self.skin_choice.GetCount() > 0:
@@ -1535,6 +2224,13 @@ class SettingsFrame(wx.Frame):
         self.enable_tce_sounds_cb.SetValue(str(environment_settings.get('enable_tce_sounds', 'False')).lower() in ['true', '1'])
         if self.register_titan_tts_sapi_cb is not None:
             self.register_titan_tts_sapi_cb.SetValue(str(environment_settings.get('register_titan_tts_sapi', 'False')).lower() in ['true', '1'])
+
+        # Titan shell shortcuts
+        shell_settings = self.settings.get('titan_shell', {})
+        for binding_id, checkbox in getattr(self, 'shell_binding_cbs', {}).items():
+            default = str(getattr(checkbox, 'shell_default', True))
+            checkbox.SetValue(
+                str(shell_settings.get(binding_id, default)).lower() in ['true', '1'])
 
         # Copilot key settings
         if self.copilot_remap_cb is not None:
@@ -1639,6 +2335,7 @@ class SettingsFrame(wx.Frame):
             self.notify_new_apps_cb.SetValue(tn.get('notify_new_apps', True))
             self.notify_private_msg_cb.SetValue(tn.get('notify_private_messages', True))
             self.notify_chat_msg_cb.SetValue(tn.get('notify_chat_messages', True))
+            self.server_sounds_cb.SetValue(tn.get('server_sounds_enabled', True))
         except Exception as e:
             print(f"[SettingsFrame] Error loading Titan-Net settings: {e}")
 
@@ -1670,6 +2367,7 @@ class SettingsFrame(wx.Frame):
                 'notify_new_apps': self.notify_new_apps_cb.GetValue(),
                 'notify_private_messages': self.notify_private_msg_cb.GetValue(),
                 'notify_chat_messages': self.notify_chat_msg_cb.GetValue(),
+                'server_sounds_enabled': self.server_sounds_cb.GetValue(),
             }
 
             config['titannet_settings'] = tn_settings
@@ -2203,6 +2901,7 @@ class SettingsFrame(wx.Frame):
         self.settings['general'] = {
             'quick_start': str(self.quick_start_cb.GetValue()),
             'confirm_exit': str(self.confirm_exit_cb.GetValue()),
+            'developer_tools': str(self.developer_tools_cb.GetValue()),
             'startup_mode': startup_mode,
             'language': selected_language,
             'launcher': launcher_folder,
@@ -2244,6 +2943,14 @@ class SettingsFrame(wx.Frame):
                 if 0 <= idx < len(REPLACEMENT_KEYS):
                     env_settings['copilot_replacement_vk'] = str(REPLACEMENT_KEYS[idx][0])
         self.settings['environment'] = env_settings
+
+        # Titan shell shortcuts
+        shell_cbs = getattr(self, 'shell_binding_cbs', {})
+        if shell_cbs:
+            self.settings['titan_shell'] = {
+                binding_id: str(checkbox.GetValue())
+                for binding_id, checkbox in shell_cbs.items()
+            }
 
         # Apply SAPI5 registration only if the checkbox state actually changed.
         # Elevation (UAC) is triggered interactively here; startup sync stays silent.
@@ -2303,11 +3010,19 @@ class SettingsFrame(wx.Frame):
                 'volume': str(self.speech_volume_slider.GetValue()),
             }
 
-            # Save dynamic engine config controls with prefix engine.{id}.{key}
+            # Save dynamic engine config controls with prefix engine.{id}.{key}.
+            # An engine's API key goes to disk encrypted - the live engine gets
+            # the real value, the settings file never holds it in the clear.
+            try:
+                from src.titan_core.secret_store import store_value
+            except Exception:
+                def store_value(name, plaintext, field_type=''):
+                    return plaintext
             for ctrl_key, (label, ctrl, field) in self._engine_config_controls.items():
                 value = self._get_config_control_value(ctrl, field)
                 setting_key = f'engine.{engine}.{ctrl_key}'
-                stereo_speech_settings[setting_key] = value
+                stereo_speech_settings[setting_key] = store_value(
+                    ctrl_key, value, field.get('type', ''))
 
                 # Apply config to engine immediately
                 stereo_speech_obj = get_stereo_speech()
@@ -2343,6 +3058,7 @@ class SettingsFrame(wx.Frame):
             'haptic_mode': haptic_mode_value,
             'vibration_strength': str(self.haptic_strength_slider.GetValue() / 100.0),
             'speech_haptic_sync': str(self.speech_haptic_sync_cb.GetValue()),
+            'remember_mode': str(self.remember_gamepad_mode_cb.GetValue()),
         })
         self.settings['controller'] = controller_section
 
@@ -2379,6 +3095,28 @@ class SettingsFrame(wx.Frame):
             restart_system_monitor()
         except Exception as e:
             print(f"Warning: Could not restart system monitor: {e}")
+
+        # Re-install the Titan shell hooks so turning the system interface
+        # modification (or a single shortcut) on or off takes effect now
+        # instead of on the next start - leaving the Windows key hooked after
+        # the user disabled the mode would be a trap.
+        try:
+            from src.titan_core.tce_system import apply_shell_settings
+            apply_shell_settings()
+        except Exception as e:
+            print(f"Warning: Could not apply Titan shell settings: {e}")
+
+        # Rebuild the main window's menu bar so context menus gated on settings
+        # (e.g. the Programmer menu / AI creation kit) appear or disappear
+        # immediately, without an app restart. SettingsFrame has no direct
+        # reference to the main frame (parent is None), so locate it among the
+        # top-level windows.
+        try:
+            for win in wx.GetTopLevelWindows():
+                if hasattr(win, 'rebuild_menu_bar'):
+                    win.rebuild_menu_bar()
+        except Exception as e:
+            print(f"[Settings] Could not rebuild main menu bar: {e}")
 
         # Check if startup mode or language changed to provide appropriate message
         if old_startup_mode != startup_mode or old_language != selected_language:
@@ -2763,7 +3501,14 @@ class SettingsFrame(wx.Frame):
         if old_api_key and new_api_key_key not in stereo_settings:
             stereo_settings[new_api_key_key] = old_api_key
 
-        # Load engine-specific config from settings and apply to engine
+        # Load engine-specific config from settings and apply to engine. An API
+        # key is stored encrypted, so it is decrypted here - on the way into
+        # the engine and into the field the user reads.
+        try:
+            from src.titan_core.secret_store import load_value
+        except Exception:
+            def load_value(stored):
+                return stored
         stereo_speech_obj = get_stereo_speech()
         if stereo_speech_obj:
             for setting_key, value in stereo_settings.items():
@@ -2771,7 +3516,8 @@ class SettingsFrame(wx.Frame):
                     parts = setting_key.split('.', 2)  # engine.{id}.{key}
                     if len(parts) == 3:
                         eng_id, cfg_key = parts[1], parts[2]
-                        stereo_speech_obj.set_engine_config(eng_id, cfg_key, value)
+                        stereo_speech_obj.set_engine_config(eng_id, cfg_key,
+                                                            load_value(value))
 
         # Build dynamic engine config controls for current engine
         self._rebuild_engine_config_controls(engine)
@@ -2779,7 +3525,7 @@ class SettingsFrame(wx.Frame):
         # Load saved values into dynamic controls
         for ctrl_key, (label, ctrl, field) in self._engine_config_controls.items():
             setting_key = f'engine.{engine}.{ctrl_key}'
-            saved_value = stereo_settings.get(setting_key, '')
+            saved_value = load_value(stereo_settings.get(setting_key, ''))
             if saved_value:
                 field_type = field.get('type', 'text')
                 if field_type in ('text', 'password'):

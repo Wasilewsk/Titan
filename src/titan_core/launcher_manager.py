@@ -619,9 +619,9 @@ class LauncherAPI:
             import wx
             def _open():
                 try:
-                    from src.network import messenger_webview
+                    from src.network.messenger_titan_gui import show_messenger_client
                     parent = self._get_im_parent()
-                    messenger_webview.show_messenger_webview(parent)
+                    show_messenger_client(parent)
                 except Exception as e:
                     print(f"[LauncherAPI] Error opening Messenger: {e}")
                     import traceback
@@ -638,9 +638,9 @@ class LauncherAPI:
             import wx
             def _open():
                 try:
-                    from src.network import whatsapp_webview
+                    from src.network.whatsapp_titan_gui import show_whatsapp_client
                     parent = self._get_im_parent()
-                    whatsapp_webview.show_whatsapp_webview(parent)
+                    show_whatsapp_client(parent)
                 except Exception as e:
                     print(f"[LauncherAPI] Error opening WhatsApp: {e}")
                     import traceback
@@ -744,6 +744,20 @@ class LauncherAPI:
 
         def _shutdown():
             try:
+                # Quick start skips the shutdown sound/delay, same as it skips
+                # the startup sound/delay in main.py.
+                try:
+                    from src.settings.settings import get_setting
+                    quick_start = str(get_setting('quick_start', 'False')).lower() in ('true', '1')
+                except Exception:
+                    quick_start = False
+                if not quick_start:
+                    try:
+                        from src.titan_core.sound import play_shutdown_sound
+                        play_shutdown_sound()
+                    except Exception:
+                        pass
+
                 # Stop invisible UI
                 try:
                     self.stop_invisible_ui()

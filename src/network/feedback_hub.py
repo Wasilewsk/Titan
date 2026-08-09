@@ -643,7 +643,9 @@ class FeedbackDetailDialog(wx.Dialog):
             _("Delete feedback"),
             wx.YES_NO | wx.ICON_WARNING,
         )
-        if confirm != wx.YES:
+        # _show_skinned_message returns MessageDialog.ShowModal(), i.e. wx.ID_YES
+        # / wx.ID_NO - NOT the wx.YES / wx.NO that wx.MessageBox returns.
+        if confirm != wx.ID_YES:
             return
         feedback_id = self.feedback_id
 
@@ -655,7 +657,12 @@ class FeedbackDetailDialog(wx.Dialog):
 
     def _on_delete_result(self, result: Dict, title: str):
         if not result.get('success'):
-            speak_notification(result.get('error') or _("Failed to delete"), 'error')
+            # Show the server's reason as well as speaking it - a refusal that
+            # only gets spoken reads as "the button does nothing".
+            reason = result.get('error') or _("Failed to delete")
+            speak_notification(reason, 'error')
+            _show_skinned_message(reason, _("Delete feedback"),
+                                  wx.OK | wx.ICON_ERROR, self)
             return
         self.deleted = True
         speak_notification(_("Deleted: {title}").format(title=title), 'success')
@@ -1277,7 +1284,8 @@ class FeedbackHubFrame(wx.Frame):
             _("Delete feedback"),
             wx.YES_NO | wx.ICON_WARNING,
         )
-        if confirm != wx.YES:
+        # ShowModal() result - compare against wx.ID_YES, not wx.YES.
+        if confirm != wx.ID_YES:
             return
 
         def _send():
@@ -1288,7 +1296,10 @@ class FeedbackHubFrame(wx.Frame):
 
     def _on_delete_result(self, result: Dict, title: str):
         if not result.get('success'):
-            speak_notification(result.get('error') or _("Failed to delete"), 'error')
+            reason = result.get('error') or _("Failed to delete")
+            speak_notification(reason, 'error')
+            _show_skinned_message(reason, _("Delete feedback"),
+                                  wx.OK | wx.ICON_ERROR, self)
             return
         speak_notification(_("Deleted: {title}").format(title=title), 'success')
         self._refresh_items(announce=False)

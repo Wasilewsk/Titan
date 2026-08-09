@@ -1,0 +1,128 @@
+# Example Titan Script (.TCS)
+#
+# Everything the language does, in one file: variables and arithmetic, a
+# question, a whole dialog, conditions, a loop, its own sound, a second script
+# beside it, real Titan actions - every action the assistant has, including
+# other macros - and speech in the user's own voice.
+#
+# Open it in the Macro Manager and press Enter, or double-click the .tcs file.
+#
+# To have Titan run it by itself, uncomment one of these:
+# when startup
+# when time = "08:00"
+# when every = "2h"
+
+
+# ---------------------------------------------------------------------------
+# 1. Variables, and doing something to them
+# ---------------------------------------------------------------------------
+set clock = now("%H:%M")
+set day = today("%A, %d %B")
+set minutes_left = 60 - number(now("%M"))
+
+say "Good day. It is {{clock}}."
+
+
+# ---------------------------------------------------------------------------
+# 2. Asking one question
+# ---------------------------------------------------------------------------
+ask who = "What should I call you?" default="friend" title="Example script"
+
+set greeting = "Hello, " + upper(who)
+say "{{greeting}}"
+
+
+# ---------------------------------------------------------------------------
+# 3. Reading what Titan and its add-ons say, and deciding on it
+# ---------------------------------------------------------------------------
+set chime = zegarynka.get_settings
+set volume = system.get_volume
+
+if chime contains "on"
+    say "Your clock chime is on."
+else
+    say "Your clock chime is off."
+end
+
+if minutes_left is less than 10
+    say "Only {{minutes_left}} minutes left in this hour."
+end
+
+
+# ---------------------------------------------------------------------------
+# 4. A whole window, several answers at once
+# ---------------------------------------------------------------------------
+dialog "Write a note"
+    field title = "Title" default="Notes for {{day}}"
+    multiline body = "What should the note say?"
+    choice importance = "How important?" options "normal", "high"
+    check speak_it = "Read it back to me"
+end
+
+tnotes.create_note title="{{title}}" text="{{body}}"
+say "Saved a note called {{title}}."
+
+if speak_it is true
+    titan.speak "{{body}}"
+end
+
+if importance is "high"
+    treminder.create_reminder name="Look at: {{title}}" date="today" time="18:00"
+    say "I put a reminder on it for six o'clock."
+end
+
+
+# ---------------------------------------------------------------------------
+# 5. Its own sound, played through Titan's mixer
+#    A bare name is looked for next to this script.
+# ---------------------------------------------------------------------------
+play "done.ogg"
+play "done.ogg" position=-0.8
+play "done.ogg" position=0.8 wait=true
+
+
+# ---------------------------------------------------------------------------
+# 5b. Borrowing a different voice - for this script only.
+#     It is never saved, and Titan goes back to the user's own voice the
+#     moment the script ends, however it ends. Uncomment to hear it.
+# ---------------------------------------------------------------------------
+# voice engine="espeak_dll" rate=2
+# say "This is the borrowed voice."
+# voice reset
+# say "And this is yours again."
+
+
+# ---------------------------------------------------------------------------
+# 6. Another script in the same folder. It gets its own variables and
+#    hands back whatever it finished with.
+# ---------------------------------------------------------------------------
+run "summary.tcs"
+set summary = last
+say "The other script said it {{summary}}." interrupt=true
+
+
+# ---------------------------------------------------------------------------
+# 7. Any other macro, of any type, by name
+# ---------------------------------------------------------------------------
+# macros.run_macro name="test macro"
+
+
+# ---------------------------------------------------------------------------
+# 8. Repeating, waiting, and a message box at the end
+# ---------------------------------------------------------------------------
+repeat 2
+    wait 1s
+end
+
+# An action answers in a sentence, so it is used as one.
+set report = "Done, " + who + ". " + volume
+
+say "{{report}}" wait=true
+message "{{report}}" title="Example script"
+
+
+# ---------------------------------------------------------------------------
+# 9. Pseudocode - only with AI features switched on.
+#    Uncomment to let the AI work out which actions this means.
+# ---------------------------------------------------------------------------
+# do "tell me what the weather is like and put it in a note called weather"

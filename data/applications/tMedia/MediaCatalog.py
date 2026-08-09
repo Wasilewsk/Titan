@@ -1,70 +1,292 @@
 import wx
 import requests
 import os
+import html
+import platform
 import feedparser
 import subprocess
-from urllib.parse import unquote, quote, urljoin
+import unicodedata
+from pathlib import Path
+from urllib.parse import unquote, quote, urljoin, urlparse
+from urllib.request import url2pathname
+
+
+def _norm_country(s):
+    """Accent/case-insensitive fold for country-name matching (handles Polish
+    'l with stroke', which NFKD does not decompose)."""
+    s = ''.join({'ł': 'l', 'Ł': 'L'}.get(c, c) for c in (s or ''))
+    return ''.join(c for c in unicodedata.normalize('NFKD', s.lower())
+                   if not unicodedata.combining(c)).strip()
 
 from threading import Thread
 from concurrent.futures import ThreadPoolExecutor
-from player import Player  # Importowanie wbudowanego odtwarzacza
+from translation import _
+
+import common
+import playlist
 
 try:
-    from src.titan_core.skin_manager import apply_skin_to_window
+    import win32api
 except ImportError:
-    apply_skin_to_window = None
+    win32api = None
+
+# One list of playable extensions for the whole app (the tree and the
+# audiobook playlist builder must agree on what counts as media).
+MEDIA_FILE_EXTENSIONS = playlist.MEDIA_FILE_EXTENSIONS
+
+GOOGLE_DRIVE_MARKER = 'googledrive://'
 
 
-def _apply_skin_to_tree(window):
-    if not apply_skin_to_window or not window:
-        return
+def _detect_google_drive_path():
+    """Finds the drive letter Google Drive for Desktop is mounted on (Windows only)."""
+    if platform.system() != 'Windows' or win32api is None:
+        return None
     try:
-        apply_skin_to_window(window)
+        drives = win32api.GetLogicalDriveStrings().split('\x00')
     except Exception:
-        return
-    for child in window.GetChildren():
-        _apply_skin_to_tree(child)
+        return None
+    for drive in drives:
+        if not drive:
+            continue
+        try:
+            volume_name = win32api.GetVolumeInformation(drive)[0]
+        except Exception:
+            continue
+        if 'google drive' in volume_name.strip().lower():
+            return drive
+    return None
 
 
+def _file_uri_to_path(uri):
+    return url2pathname(urlparse(uri).path)
 
-class MediaCatalog(wx.Frame):
-    def __init__(self, parent, *args, **kwargs):
-        super(MediaCatalog, self).__init__(parent, *args, **kwargs)
-        self.SetTitle("Katalog Mediów")
-        self.SetSize((600, 400))
+
+RADIO_BROWSER_COUNTRIES_URL = "https://de1.api.radio-browser.info/json/countries"
+RADIO_BROWSER_STATIONS_URL = "https://de1.api.radio-browser.info/json/stations/bycountrycodeexact/"
+
+
+class LanguagePickerDialog(wx.Dialog):
+    def __init__(self, parent):
+        super().__init__(parent, title=_("Select Radio Language"), size=(450, 500))
+
         panel = wx.Panel(self)
+        vbox = wx.BoxSizer(wx.VERTICAL)
+
+        self.status_label = wx.StaticText(panel, label=_("Loading available languages..."))
+        vbox.Add(self.status_label, flag=wx.ALL, border=10)
+
+        self.country_list = wx.ListBox(panel)
+        vbox.Add(self.country_list, proportion=1, flag=wx.EXPAND | wx.LEFT | wx.RIGHT, border=10)
+
+        self.progress = wx.Gauge(panel, range=0, size=(-1, 15))
+        vbox.Add(self.progress, flag=wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, border=10)
+
+        btn_sizer = wx.StdDialogButtonSizer()
+        self.ok_btn = wx.Button(panel, wx.ID_OK)
+        self.ok_btn.Disable()
+        btn_sizer.AddButton(self.ok_btn)
+        self.cancel_btn = wx.Button(panel, wx.ID_CANCEL)
+        btn_sizer.AddButton(self.cancel_btn)
+        btn_sizer.Realize()
+        vbox.Add(btn_sizer, flag=wx.ALL, border=10)
+
+        panel.SetSizer(vbox)
+        common.apply_skin(self)
+
+        self.countries = []
+        self.selected_country_code = None
+
+        Thread(target=self._fetch_countries, daemon=True).start()
+
+    def _fetch_countries(self):
+        try:
+            resp = requests.get(RADIO_BROWSER_COUNTRIES_URL, timeout=15)
+            if resp.status_code == 200:
+                data = resp.json()
+                self.countries = [
+                    c for c in data
+                    if c.get("stationcount", 0) > 0
+                ]
+                self.countries.sort(key=lambda c: c.get("stationcount", 0), reverse=True)
+                wx.CallAfter(self._populate_list)
+            else:
+                wx.CallAfter(self._show_error, _("Failed to load languages (HTTP %d)") % resp.status_code)
+        except requests.RequestException as e:
+            wx.CallAfter(self._show_error, _("Network error: %s") % str(e))
+
+    def _populate_list(self):
+        self.country_list.Clear()
+        for c in self.countries:
+            name = c.get("name", "?")
+            count = c.get("stationcount", 0)
+            self.country_list.Append(f"{name} ({count} {_('stations')})")
+        self.status_label.SetLabel(_("Select a language and press OK"))
+        self.ok_btn.Enable()
+        self.progress.Pulse()
+
+    def _show_error(self, msg):
+        self.status_label.SetLabel(msg)
+        self.progress.StopPulse()
+
+    def get_selected_code(self):
+        sel = self.country_list.GetSelection()
+        if sel != wx.NOT_FOUND and sel < len(self.countries):
+            return self.countries[sel].get("iso_3166_1")
+        return None
+
+
+class MediaCatalogPanel(wx.Panel):
+    def __init__(self, parent, owner, *args, auto_start=True, **kwargs):
+        super(MediaCatalogPanel, self).__init__(parent, *args, **kwargs)
+        self.owner = owner
 
         vbox = wx.BoxSizer(wx.VERTICAL)
-        self.media_tree = wx.TreeCtrl(panel)
-        root = self.media_tree.AddRoot("Katalog Mediów")
+        self.media_tree = wx.TreeCtrl(self)
+        root = self.media_tree.AddRoot(_("Media Catalog"))
 
         vbox.Add(self.media_tree, proportion=1, flag=wx.EXPAND | wx.ALL, border=10)
 
-        # Add progress bar
-        self.progress_bar = wx.Gauge(panel, range=100, size=(-1, 20))
+        self.progress_bar = wx.Gauge(self, range=100, size=(-1, 20))
         vbox.Add(self.progress_bar, flag=wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, border=10)
-        self.progress_bar.Hide() # Initially hidden
+        self.progress_bar.Hide()
 
-        panel.SetSizer(vbox)
-        _apply_skin_to_tree(self)
+        self.SetSizer(vbox)
+        common.apply_skin(self)
 
-        # Bindowanie zdarzeń
         self.media_tree.Bind(wx.EVT_TREE_ITEM_EXPANDING, self.on_item_expanding)
         self.media_tree.Bind(wx.EVT_TREE_ITEM_ACTIVATED, self.on_tree_item_activated)
+        self.media_tree.Bind(wx.EVT_TREE_ITEM_MENU, self.on_tree_item_menu)
         self.media_tree.Bind(wx.EVT_CHAR_HOOK, self.on_tree_key_down)
 
-        # Start initial data loading in a separate thread
-        self.initial_load_thread = Thread(target=self._load_initial_data_threaded, args=(root,), daemon=True)
-        self.initial_load_thread.start()
-
         self.loading_sound_channel = None
+        self.root_node = root
+        self._selected_country_code = None
+        self.podcast_node = None
 
-    def _load_initial_data_threaded(self, root_node):
+        # ``auto_start`` False is used when TMedia is launched straight into a
+        # specific mode (e.g. the agent asked to play a radio station for a given
+        # country): the caller drives loading itself and we must NOT pop the
+        # interactive country picker.
+        if auto_start:
+            wx.CallAfter(self._show_language_picker)
+
+    def focus_default(self):
+        self.media_tree.SetFocus()
+
+    def _show_language_picker(self):
+        dlg = LanguagePickerDialog(self)
+        result = dlg.ShowModal()
+        if result == wx.ID_OK:
+            self._selected_country_code = dlg.get_selected_code()
+        dlg.Destroy()
+
+        if self._selected_country_code:
+            self.initial_load_thread = Thread(
+                target=self._load_initial_data_threaded,
+                args=(self.root_node, self._selected_country_code),
+                daemon=True,
+            )
+            self.initial_load_thread.start()
+        else:
+            self._load_without_radio()
+
+    # ------------------------------------------------------------------ #
+    # Direct radio mode (agent-driven): auto-pick a country, skip the picker
+    # ------------------------------------------------------------------ #
+    def load_radio_direct(self, country_name=None, query=None):
+        """Load radio stations for ``country_name`` (an English country name or
+        an ISO 3166-1 code) without showing the picker, and auto-play the first
+        station matching ``query`` if given. Falls back to the interactive picker
+        when the country cannot be resolved."""
+        self.progress_bar.Show()
+        self.loading_sound_channel = common.play_sound('loading', loop=True)
+        Thread(target=self._load_radio_direct_threaded,
+               args=(country_name, query), daemon=True).start()
+
+    def _resolve_country_code(self, country_name):
+        if not country_name:
+            return None
+        try:
+            resp = requests.get(RADIO_BROWSER_COUNTRIES_URL, timeout=15)
+            countries = resp.json() if resp.status_code == 200 else []
+        except requests.RequestException:
+            return None
+        countries = [c for c in countries if c.get('stationcount', 0) > 0]
+        target = _norm_country(country_name)
+        code = (country_name or '').strip().upper()
+        # Direct ISO code (e.g. "PL").
+        for c in countries:
+            if (c.get('iso_3166_1') or '').upper() == code:
+                return c.get('iso_3166_1')
+        # Exact English name, then substring either way.
+        for c in countries:
+            if _norm_country(c.get('name', '')) == target:
+                return c.get('iso_3166_1')
+        for c in countries:
+            n = _norm_country(c.get('name', ''))
+            if target and (target in n or n in target):
+                return c.get('iso_3166_1')
+        return None
+
+    def _load_radio_direct_threaded(self, country_name, query):
+        code = self._resolve_country_code(country_name)
+        if not code:
+            # Couldn't auto-pick: don't guess, fall back to the normal picker.
+            wx.CallAfter(common.stop_sound, 'loading')
+            wx.CallAfter(self.progress_bar.Hide)
+            wx.CallAfter(self._show_language_picker)
+            return
+        stations = self._get_radio_stations(code)
+        wx.CallAfter(self._populate_radio_only, stations, query)
+        wx.CallAfter(self.loading_complete_initial)
+        wx.CallAfter(common.stop_sound, 'loading')
+
+    def _populate_radio_only(self, stations, query):
+        radio_node = self.media_tree.AppendItem(self.root_node, _("Radio Stations"))
+        match_item = None
+        for station in stations:
+            item = self.media_tree.AppendItem(radio_node, station['name'])
+            self.media_tree.SetItemData(item, station['url'])
+            if (query and match_item is None
+                    and _norm_country(query) in _norm_country(station['name'])):
+                match_item = item
+        self.media_tree.SetItemHasChildren(radio_node, True)
+        self.media_tree.Expand(self.root_node)
+        self.media_tree.Expand(radio_node)
+        if match_item is not None:
+            self.media_tree.SelectItem(match_item)
+            self.media_tree.EnsureVisible(match_item)
+            url = self.media_tree.GetItemData(match_item)
+            self.play_media(url, self.media_tree.GetItemText(match_item))
+        else:
+            first = self.media_tree.GetFirstChild(radio_node)[0]
+            if first.IsOk():
+                self.media_tree.SelectItem(first)
+                self.media_tree.EnsureVisible(first)
+            if query:
+                common.speak(_("No station matching %s; showing all stations.") % query)
+        self.media_tree.SetFocus()
+
+    def _load_without_radio(self):
+        self.progress_bar.Show()
+        self.loading_sound_channel = common.play_sound('loading', loop=True)
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            future_podcasts = executor.submit(self._get_podcasts_data)
+            future_urls = executor.submit(self._get_url_catalogs_data)
+            podcasts_data = future_podcasts.result()
+            url_catalogs_data = future_urls.result()
+
+        wx.CallAfter(self._populate_tree_no_radio, self.root_node, podcasts_data, url_catalogs_data)
+        wx.CallAfter(self.loading_complete_initial)
+        wx.CallAfter(common.stop_sound, 'loading')
+
+    def _load_initial_data_threaded(self, root_node, country_code):
         wx.CallAfter(self.progress_bar.Show)
-        self.loading_sound_channel = wx.CallAfter(self.GetParent().play_sound, 'loading', loop=True)
+        self.loading_sound_channel = wx.CallAfter(common.play_sound, 'loading', loop=True)
 
         with ThreadPoolExecutor(max_workers=3) as executor:
-            future_stations = executor.submit(self._get_polish_radio_stations)
+            future_stations = executor.submit(self._get_radio_stations, country_code)
             future_podcasts = executor.submit(self._get_podcasts_data)
             future_urls = executor.submit(self._get_url_catalogs_data)
 
@@ -72,30 +294,20 @@ class MediaCatalog(wx.Frame):
             podcasts_data = future_podcasts.result()
             url_catalogs_data = future_urls.result()
 
-        # Now, update GUI on the main thread
         wx.CallAfter(self._populate_initial_tree, root_node, stations, podcasts_data, url_catalogs_data)
-
         wx.CallAfter(self.loading_complete_initial)
-        wx.CallAfter(self.GetParent().stop_sound, 'loading')
+        wx.CallAfter(common.stop_sound, 'loading')
 
-    def _get_polish_radio_stations(self):
-        """Pobiera listę polskich stacji radiowych z Radio-Browser API."""
-        url = "https://de1.api.radio-browser.info/json/stations"
+    def _get_radio_stations(self, country_code):
         try:
-            response = requests.get(url, timeout=5) # Add timeout to prevent indefinite blocking
+            response = requests.get(RADIO_BROWSER_STATIONS_URL + quote(country_code), timeout=15)
             if response.status_code == 200:
-                all_stations = response.json()
-                polish_stations = [
-                    station for station in all_stations
-                    if "countrycode" in station and station["countrycode"] == "PL"
-                ]
-                return polish_stations
-        except requests.exceptions.RequestException as e:
-            wx.CallAfter(self.show_error_message, f"Błąd podczas pobierania stacji radiowych: {e}")
+                return response.json()
+        except requests.RequestException as e:
+            wx.CallAfter(self.show_error_message, _("Error loading radio stations (%s): %s") % (country_code, e))
         return []
 
     def _get_podcasts_data(self):
-        """Pobiera dane podcastów z pliku podcastdb.tmedia."""
         podcast_file = 'data/podcastdb.tmedia'
         data = []
         if os.path.exists(podcast_file):
@@ -106,13 +318,12 @@ class MediaCatalog(wx.Frame):
                             name, rss_url = line.strip().split('=', 1)
                             data.append((name, rss_url))
             except Exception as e:
-                wx.CallAfter(self.show_error_message, f"Błąd podczas ładowania podcastów z pliku {podcast_file}: {e}")
+                wx.CallAfter(self.show_error_message, _("Error loading podcasts from %s: %s") % (podcast_file, e))
         else:
-            wx.CallAfter(self.show_error_message, f"Plik podcastów nie znaleziony: {podcast_file}")
+            wx.CallAfter(self.show_error_message, _("Podcast file not found: %s") % podcast_file)
         return data
 
     def _get_url_catalogs_data(self):
-        """Pobiera dane katalogów URL z pliku urls.tmedia."""
         urls_file = 'data/urls.tmedia'
         data = []
         if os.path.exists(urls_file):
@@ -121,106 +332,142 @@ class MediaCatalog(wx.Frame):
                     for line in f:
                         if '=' in line:
                             name, url = line.strip().split('=', 1)
+                            if url.strip().lower() == GOOGLE_DRIVE_MARKER:
+                                drive_path = _detect_google_drive_path()
+                                if not drive_path:
+                                    continue
+                                url = Path(drive_path).as_uri()
                             data.append((name, url))
             except Exception as e:
-                wx.CallAfter(self.show_error_message, f"Błąd podczas ładowania katalogów URL z pliku {urls_file}: {e}")
+                wx.CallAfter(self.show_error_message, _("Error loading URL catalogs from %s: %s") % (urls_file, e))
         else:
-            wx.CallAfter(self.show_error_message, f"Plik katalogów URL nie znaleziony: {urls_file}")
+            wx.CallAfter(self.show_error_message, _("URL catalog file not found: %s") % urls_file)
         return data
 
     def _populate_initial_tree(self, root_node, stations, podcasts_data, url_catalogs_data):
-        # Dodanie sekcji dla stacji radiowych
-        self.update_progress(10)
-        radio_node = self.media_tree.AppendItem(root_node, "Stacje Radiowe")
+        self.update_progress(5)
+        radio_node = self.media_tree.AppendItem(root_node, _("Radio Stations"))
+
         for i, station in enumerate(stations):
             item = self.media_tree.AppendItem(radio_node, station['name'])
             self.media_tree.SetItemData(item, station['url'])
-            self.update_progress(10 + int((i / len(stations)) * 30))
+            self.update_progress(5 + int((i / max(len(stations), 1)) * 35))
+        self.media_tree.SetItemHasChildren(radio_node, True)
 
-        # Dodanie sekcji dla podcastów
         self.update_progress(40)
-        podcast_node = self.media_tree.AppendItem(root_node, "Podcasty")
+        podcast_node = self.media_tree.AppendItem(root_node, _("Podcasts"))
+        self.podcast_node = podcast_node
         for name, rss_url in podcasts_data:
             item = self.media_tree.AppendItem(podcast_node, name)
             self.media_tree.SetItemData(item, rss_url)
             self.media_tree.SetItemHasChildren(item, True)
         self.update_progress(70)
 
-        # Dodanie katalogu "Biblioteka Mediów"
-        self.update_progress(70) # Update progress for podcasts
-        library_node = self.media_tree.AppendItem(root_node, "Biblioteka Mediów")
+        library_node = self.media_tree.AppendItem(root_node, _("Media Library"))
         for name, url in url_catalogs_data:
             item = self.media_tree.AppendItem(library_node, name)
             self.media_tree.SetItemData(item, url)
             self.media_tree.SetItemHasChildren(item, True)
         self.update_progress(100)
-        self.media_tree.Expand(root_node) # Expand the root after initial load
+        self.media_tree.Expand(root_node)
+
+    def _populate_tree_no_radio(self, root_node, podcasts_data, url_catalogs_data):
+        self.update_progress(20)
+        podcast_node = self.media_tree.AppendItem(root_node, _("Podcasts"))
+        self.podcast_node = podcast_node
+        for name, rss_url in podcasts_data:
+            item = self.media_tree.AppendItem(podcast_node, name)
+            self.media_tree.SetItemData(item, rss_url)
+            self.media_tree.SetItemHasChildren(item, True)
+        self.update_progress(60)
+
+        library_node = self.media_tree.AppendItem(root_node, _("Media Library"))
+        for name, url in url_catalogs_data:
+            item = self.media_tree.AppendItem(library_node, name)
+            self.media_tree.SetItemData(item, url)
+            self.media_tree.SetItemHasChildren(item, True)
+        self.update_progress(100)
+        self.media_tree.Expand(root_node)
 
     def _load_podcast_episodes(self, podcast_node, rss_url):
-        """Ładuje wszystkie odcinki podcastu z kanału RSS po rozwinięciu."""
         def _load_and_populate():
             try:
                 feed = feedparser.parse(rss_url)
-
-                if feed.bozo:
-                    wx.CallAfter(self.show_error_message, f"Błąd parsowania kanału RSS dla {rss_url}: {feed.bozo_exception}")
+                if feed.bozo and not feed.entries:
+                    wx.CallAfter(self.show_error_message, _("Error parsing RSS feed for %s: %s") % (rss_url, feed.bozo_exception))
                     return
-
                 for entry in feed.entries:
-                    title = entry.title
-                    if hasattr(entry, 'published'):
+                    title = entry.get('title', rss_url)
+                    if entry.get('published'):
                         title += f" ({entry.published})"
                     episode_node = self.media_tree.AppendItem(podcast_node, title)
-
-                    # Zapisz link do pliku audio w danych węzła
-                    if entry.enclosures and len(entry.enclosures) > 0:
-                        audio_url = entry.enclosures[0].href
+                    enclosures = entry.get('enclosures') or []
+                    audio_url = enclosures[0].get('href') if enclosures else None
+                    if audio_url:
                         self.media_tree.SetItemData(episode_node, (audio_url, title))
             except Exception as e:
-                wx.CallAfter(self.show_error_message, f"Nieoczekiwany błąd podczas ładowania odcinków podcastu z {rss_url}: {e}")
+                wx.CallAfter(self.show_error_message, _("Error loading podcast episodes from %s: %s") % (rss_url, e))
         Thread(target=_load_and_populate).start()
 
     def on_item_expanding(self, event):
-        """Ładuje zawartość katalogu lub odcinki podcastu, gdy użytkownik go rozwija."""
         item = event.GetItem()
         url = self.media_tree.GetItemData(item)
         if url and self.media_tree.GetChildrenCount(item) == 0:
-            if 'http' in url:
-                self.load_directory(item, url)
-            else:  # Jeśli to jest podcast
+            if isinstance(url, str) and self.podcast_node is not None and self.media_tree.GetItemParent(item) == self.podcast_node:
                 self._load_podcast_episodes(item, url)
+            elif isinstance(url, str) and url.startswith('file://'):
+                self.load_local_directory(item, url)
+            elif isinstance(url, str) and 'http' in url:
+                self.load_directory(item, url)
 
     def load_directory(self, parent_node, base_url):
-        """Funkcja do leniwego ładowania zawartości katalogu i podkatalogów."""
-
         def list_files_threaded():
             try:
-                response = requests.get(base_url, timeout=10) # Dodano timeout
+                response = requests.get(base_url, timeout=10)
                 if response.status_code == 200:
                     lines = response.text.splitlines()
-                    total_lines = len(lines)
-                    for i, line in enumerate(lines):
+                    for line in lines:
                         if 'href="' in line:
                             start = line.find('href="') + len('href="')
                             end = line.find('"', start)
-                            link = line[start:end]
-                            full_url = urljoin(base_url, link)
+                            link = html.unescape(line[start:end])
+                            full_url = urljoin(base_url, quote(link, safe='%/'))
                             display_name = unquote(link).replace('%20', ' ').strip('/')
 
-                            if link.endswith('/'):  # To jest katalog
+                            if link.endswith('/'):
                                 folder_node = self.media_tree.AppendItem(parent_node, display_name)
                                 self.media_tree.SetItemData(folder_node, full_url)
                                 self.media_tree.SetItemHasChildren(folder_node, True)
-                            elif link.endswith(('.mp3', '.wav', '.ogg', '.wma', '.flac', '.aac',
-                                                '.mp4', '.avi', '.mkv', '.mov', '.wmv', '.flv',
-                                                '.webm', '.m4a')):  # To jest plik audio lub wideo
+                            elif link.lower().endswith(MEDIA_FILE_EXTENSIONS):
                                 file_node = self.media_tree.AppendItem(parent_node, display_name)
                                 self.media_tree.SetItemData(file_node, full_url)
-
             except requests.ConnectionError as e:
-                wx.CallAfter(self.show_error_message, f"Błąd połączenia podczas ładowania katalogu {base_url}: {e}")
+                wx.CallAfter(self.show_error_message, _("Connection error loading catalog %s: %s") % (base_url, e))
             except Exception as e:
-                wx.CallAfter(self.show_error_message, f"Nieoczekiwany błąd podczas ładowania katalogu {base_url}: {e}")
+                wx.CallAfter(self.show_error_message, _("Error loading catalog %s: %s") % (base_url, e))
+            finally:
+                wx.CallAfter(self.loading_complete, parent_node)
+
+        thread = Thread(target=list_files_threaded, daemon=True)
+        thread.start()
+
+    def load_local_directory(self, parent_node, base_url):
+        def list_files_threaded():
+            try:
+                base_path = _file_uri_to_path(base_url)
+                entries = sorted(os.scandir(base_path), key=lambda e: e.name.lower())
+                for entry in entries:
+                    if entry.is_dir():
+                        full_url = Path(entry.path).as_uri()
+                        folder_node = self.media_tree.AppendItem(parent_node, entry.name)
+                        self.media_tree.SetItemData(folder_node, full_url)
+                        self.media_tree.SetItemHasChildren(folder_node, True)
+                    elif entry.name.lower().endswith(MEDIA_FILE_EXTENSIONS):
+                        full_url = Path(entry.path).as_uri()
+                        file_node = self.media_tree.AppendItem(parent_node, entry.name)
+                        self.media_tree.SetItemData(file_node, full_url)
+            except Exception as e:
+                wx.CallAfter(self.show_error_message, _("Error loading catalog %s: %s") % (base_url, e))
             finally:
                 wx.CallAfter(self.loading_complete, parent_node)
 
@@ -233,62 +480,143 @@ class MediaCatalog(wx.Frame):
     def loading_complete_initial(self):
         self.progress_bar.Hide()
         if self.loading_sound_channel:
-            self.GetParent().stop_sound(channel=self.loading_sound_channel) # Stop loading sound
-        self.GetParent().play_sound('ding') # Play ding sound
+            common.stop_sound(channel=self.loading_sound_channel)
+        common.play_sound('ding')
 
     def loading_complete(self, parent_node):
         self.progress_bar.Hide()
         if self.loading_sound_channel:
-            self.GetParent().stop_sound(channel=self.loading_sound_channel) # Stop loading sound
-        self.GetParent().play_sound('ding') # Play ding sound
+            common.stop_sound(channel=self.loading_sound_channel)
+        common.play_sound('ding')
         self.media_tree.Expand(parent_node)
 
+    def _is_audiobook_folder(self, item, data):
+        """Is this tree node a FOLDER of media (an audiobook) rather than a
+        single playable item? Podcast feeds also have children and a URL, so
+        they are excluded explicitly - expanding one lists episodes, it is not
+        a folder that can be played end to end."""
+        if not isinstance(data, str):
+            return False
+        if self.podcast_node is not None:
+            parent = self.media_tree.GetItemParent(item)
+            if parent.IsOk() and parent == self.podcast_node:
+                return False
+        return playlist.looks_like_folder(data)
+
     def on_tree_item_activated(self, event):
-        """Obsługuje zdarzenie aktywacji elementu w drzewie (np. podwójne kliknięcie)."""
         item = event.GetItem()
         if item:
             media_url = self.media_tree.GetItemData(item)
             if media_url:
-                if isinstance(media_url, tuple): # Sprawdź, czy to krotka (URL, tytuł)
+                if isinstance(media_url, tuple):
                     url_to_play = media_url[0]
                     display_title = media_url[1]
                 else:
                     url_to_play = media_url
-                    display_title = unquote(url_to_play).split('/')[-1] # Domyślny tytuł z URL
+                    display_title = self.media_tree.GetItemText(item)
 
-                self.play_media(url_to_play)
-                self.GetParent().play_sound('done')
-                self.GetParent().speak_message(f"Odtwarzanie: {display_title}")
+                # Enter on a folder plays the WHOLE folder as an audiobook
+                # (the tree is still browsed with the arrow keys) - the way a
+                # book split into dozens of files is meant to be listened to.
+                if self._is_audiobook_folder(item, media_url):
+                    self.play_folder(url_to_play, display_title)
+                    return
+
+                self.play_media(url_to_play, display_title)
+                common.play_sound('done')
+                common.speak(_("Playing: %s") % display_title)
+
+    def on_tree_item_menu(self, event):
+        """Context menu (Applications key / right click): everything that can
+        be done to the focused node, so nothing depends on a shortcut."""
+        item = event.GetItem()
+        if not item or not item.IsOk():
+            return
+        data = self.media_tree.GetItemData(item)
+        if not data:
+            return
+        title = self.media_tree.GetItemText(item)
+        is_folder = self._is_audiobook_folder(item, data)
+        url = data[0] if isinstance(data, tuple) else data
+
+        menu = wx.Menu()
+        if is_folder:
+            play_folder_item = menu.Append(wx.ID_ANY, _("Play folder as audiobook"))
+            self.Bind(wx.EVT_MENU,
+                      lambda e: self.play_folder(url, title), play_folder_item)
+            resume_item = menu.Append(wx.ID_ANY, _("Play from position..."))
+            self.Bind(wx.EVT_MENU,
+                      lambda e: self._play_from_position(url, title, True),
+                      resume_item)
+        else:
+            play_item = menu.Append(wx.ID_ANY, _("Play"))
+            self.Bind(wx.EVT_MENU, lambda e: self.play_media(url, title), play_item)
+            position_item = menu.Append(wx.ID_ANY, _("Play from position..."))
+            self.Bind(wx.EVT_MENU,
+                      lambda e: self._play_from_position(url, title, False),
+                      position_item)
+        self.PopupMenu(menu)
+        menu.Destroy()
+
+    def _play_from_position(self, url, title, is_folder):
+        """Start this item at a position the user types ("50%", "49 min",
+        "1:23:45") instead of at its beginning or its resume point."""
+        dlg = wx.TextEntryDialog(
+            self, _("Position (for example 50%, 49 minutes, 1:23:45)"),
+            _("Play from position"), "")
+        spec = dlg.GetValue().strip() if dlg.ShowModal() == wx.ID_OK else ''
+        dlg.Destroy()
+        if not spec:
+            return
+        if is_folder:
+            self.owner.play_folder(url, title, start_spec=spec)
+        else:
+            common.play_sound('enteringtplayer')
+            self.owner.play_media(url, title, start_spec=spec)
 
     def on_tree_key_down(self, event):
-        """Obsługuje zdarzenia klawiszy w drzewie katalogów."""
-        if event.GetKeyCode() == wx.WXK_RETURN:
+        key = event.GetKeyCode()
+        if key == wx.WXK_RETURN:
             item = self.media_tree.GetSelection()
             if item:
                 self.on_tree_item_activated(wx.TreeEvent(wx.wxEVT_TREE_ITEM_ACTIVATED, self.media_tree, item))
+        elif key == wx.WXK_ESCAPE:
+            self.owner.go_back()
         else:
             event.Skip()
 
-    def play_media(self, url):
-        """Odtwarza wybrany strumień za pomocą VLC lub wbudowanego odtwarzacza."""
-        player = self.GetParent().config.get('DEFAULT', 'player', fallback='tplayer')
+    def play_folder(self, url, title=None):
+        """Play a whole folder as one audiobook. With external VLC selected,
+        VLC gets the folder itself (it builds its own playlist); the built-in
+        player gets a real track list and remembers the place in it."""
+        player = common.config.get('DEFAULT', 'player', fallback='tplayer')
+        if player == 'vlc':
+            target = playlist.url_to_local_path(url) or url
+            try:
+                if os.name == 'nt':
+                    subprocess.Popen(["C:/Program Files/VideoLAN/VLC/vlc.exe", target])
+                else:
+                    subprocess.Popen(["vlc", target])
+            except Exception as e:
+                self.show_error_message(_("Could not start VLC: %s") % e)
+            return
+        common.play_sound('enteringtplayer')
+        self.owner.play_folder(url, title)
 
-        # URL powinien być już poprawnie zakodowany, więc przekazujemy go bezpośrednio
-        # encoded_url = quote(url, safe="%/:=&?~#+!$,;'@()*[]") # Usunięto podwójne kodowanie
-        encoded_url = url
+    def play_media(self, url, title=None):
+        player = common.config.get('DEFAULT', 'player', fallback='tplayer')
 
         if player == 'vlc':
             if os.name == 'nt':
                 vlc_path = "C:/Program Files/VideoLAN/VLC/vlc.exe"
-                subprocess.Popen([vlc_path, encoded_url])
+                subprocess.Popen([vlc_path, url])
             elif os.name == 'posix':
-                subprocess.Popen(["vlc", encoded_url])
+                subprocess.Popen(["vlc", url])
         else:
-            tplayer = Player(self)
-            tplayer.play_file(encoded_url)
-            tplayer.Show()
-            self.GetParent().play_sound('enteringtplayer')
-            self.GetParent().speak_message(f"Odtwarzacz: {unquote(url).split('/')[-1]}")
+            display_title = title or unquote(url).split('/')[-1]
+            common.play_sound('enteringtplayer')
+            common.speak(_("Player: %s") % display_title)
+            self.owner.play_media(url, title)
 
     def show_error_message(self, message):
-        wx.MessageBox(message, "Błąd ładowania", wx.OK | wx.ICON_ERROR)
+        wx.MessageBox(message, _("Loading Error"), wx.OK | wx.ICON_ERROR)

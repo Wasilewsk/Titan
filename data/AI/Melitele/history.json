@@ -63,5 +63,410 @@
     "role": "user",
     "content": "o kim jesteś",
     "timestamp": 1761988593.448806
+  },
+  {
+    "role": "user",
+    "content": "Cine ești? Kim jesteś?",
+    "timestamp": 1784654895.5683439
+  },
+  {
+    "role": "assistant",
+    "content": "Jestem Melitele, boginią uzdrawiania, natury i macierzyńskiej miłości. Jestem tu, aby ci pomagać, służyć dobrą radą i wspierać cię we wszystkim, czego potrzebujesz.",
+    "timestamp": 1784654928.0871325
+  },
+  {
+    "role": "user",
+    "content": "Co się stało 24 lutego 2022 roku?",
+    "timestamp": 1784654948.7891145
+  },
+  {
+    "role": "assistant",
+    "content": "24 lutego 2022 roku rozpoczęła się pełnoskalowa inwazja Rosji na Ukrainę. To bolesny dzień, który przyniósł wiele cierpienia, wojnę i odmienił losy milionów niewinnych ludzi.",
+    "timestamp": 1784654983.966033
+  },
+  {
+    "role": "user",
+    "content": "What's the current news?",
+    "timestamp": 1784705684.571414
+  },
+  {
+    "role": "assistant",
+    "content": "Here are some of the top news stories today:\n\nThe US House of Representatives has voted to extend government funding to avoid a shutdown. On international affairs, discussions continue around tension in the Middle East and nuclear agreements involving Saudi Arabia and Iran. Meanwhile, in politics, Representative Andy Biggs won the Republican primary for governor in Arizona.",
+    "timestamp": 1784705775.7875314
+  },
+  {
+    "role": "user",
+    "content": "Set TCE to polish and set engine to S pick.",
+    "timestamp": 1784705788.3770657
+  },
+  {
+    "role": "assistant",
+    "content": "I have changed the speech engine to eSpeak and set the language to Polish for you. Some changes may fully take effect after a restart.",
+    "timestamp": 1784705810.2786894
+  },
+  {
+    "role": "user",
+    "content": "Restart Titan",
+    "timestamp": 1784705821.4308705
+  },
+  {
+    "role": "user",
+    "content": "Otwórz Nickelsha The Riddle",
+    "timestamp": 1784705931.6829503
+  },
+  {
+    "role": "assistant",
+    "content": "Uruchomiłam grę DOOM + DOOM II, w której znajdziesz epizod Knee-Deep in the Dead. Życzę owocnej rozgrywki!",
+    "timestamp": 1784705952.656531
+  },
+  {
+    "role": "user",
+    "content": "Odtwórz muzykę The Riddle.",
+    "timestamp": 1784705971.0900345
+  },
+  {
+    "role": "assistant",
+    "content": "Muzyka \"The Riddle\" została włączona. Niech dźwięki przyniosą ci spokój i radość.",
+    "timestamp": 1784705997.573864
+  },
+  {
+    "role": "user",
+    "content": "Odtwórz muzykę Children of the Omnisaya.",
+    "timestamp": 1784706024.2484674
+  },
+  {
+    "role": "assistant",
+    "content": "Odtwarzam „Children of the Omnissiah”. Niech ta muzyka przyniesie Ci ukojenie i skupienie.",
+    "timestamp": 1784706046.7216356
+  },
+  {
+    "role": "user",
+    "content": "Zmień temat dźwiękowy Titana na Longhorn.",
+    "timestamp": 1784706240.7335906
+  },
+  {
+    "role": "assistant",
+    "content": "Temat dźwiękowy został pomyślnie zmieniony na Longhorn.",
+    "timestamp": 1784706262.3912017
+  },
+  {
+    "role": "user",
+    "content": "Odtwórz muzykę Jingle radia Z z 2007 roku.",
+    "timestamp": 1784706286.1191897
+  },
+  {
+    "role": "assistant",
+    "content": "Odtwarzam dżingle Radia Zet z 2007 roku. Miłego słuchania!",
+    "timestamp": 1784706308.3082187
+  },
+  {
+    "role": "user",
+    "content": "Otwórz świat według Kiepskich, odcinek szósty.",
+    "timestamp": 1784707431.4533165
+  },
+  {
+    "role": "user",
+    "content": "Odtwórz świat według kiepskich odcinek szósty.",
+    "timestamp": 1784707954.1634657
+  },
+  {
+    "role": "user",
+    "content": "Odtwórz świat według kiepskich odcinek szósty.",
+    "timestamp": 1784709194.0430064
+  },
+  {
+    "role": "assistant",
+    "content": "Odcinek szósty Świata według Kiepskich został uruchomiony. Miłego oglądania!",
+    "timestamp": 1784709229.6304064
+  },
+  {
+    "role": "user",
+    "content": "Cześć",
+    "timestamp": 1784711218.0606253
+  },
+  {
+    "role": "assistant",
+    "content": "Niech te łagodne dźwięki przyniosą Ci spokój, ukojenie i wytchnienie od codziennych trosk. Usiądź wygodnie i odpocznij.",
+    "timestamp": 1784711245.62365
+  },
+  {
+    "role": "user",
+    "content": "Dżingle Radia Z 2006.",
+    "timestamp": 1784711260.2513103
+  },
+  {
+    "role": "assistant",
+    "content": "Odtwarzam jingle Radia ZET z 2006 roku. Miłego słuchania!",
+    "timestamp": 1784711289.145994
+  },
+  {
+    "role": "user",
+    "content": "Jaki jest mój poziom baterii?",
+    "timestamp": 1784711304.860351
+  },
+  {
+    "role": "assistant",
+    "content": "Twój poziom baterii wynosi 93 procent.",
+    "timestamp": 1784711324.0047188
+  },
+  {
+    "role": "user",
+    "content": "Jaka dziś jest pogoda w Warszawie?",
+    "timestamp": 1784711336.8388627
+  },
+  {
+    "role": "assistant",
+    "content": "W Warszawie jest dzisiaj słonecznie, a temperatura wynosi 17 stopni Celsjusza. Dzień jest piękny i łagodny.",
+    "timestamp": 1784711378.6538184
+  },
+  {
+    "role": "user",
+    "content": "Zadzwoń w WhatsApp Desktop do użytkownika Julita.",
+    "timestamp": 1784711403.206645
+  },
+  {
+    "role": "user",
+    "content": "Puść czwarty odcinek tajemnic miłości.",
+    "timestamp": 1784820841.1465032
+  },
+  {
+    "role": "assistant",
+    "content": "Czwarty odcinek Tajemnic Miłości jest już uruchomiony. Miłego oglądania, niech przyniesie Ci chwilę spokoju i odpoczynku.",
+    "timestamp": 1784820881.7661822
+  },
+  {
+    "role": "user",
+    "content": "Odtwórz lokalne tajemnice miłości odcinek czwarty.",
+    "timestamp": 1784820901.2459235
+  },
+  {
+    "role": "assistant",
+    "content": "Odtwarzam czwarty odcinek „Tajemnic miłości” zatytułowany „Pech czy grzech”. Miłego oglądania.",
+    "timestamp": 1784820958.1553814
+  },
+  {
+    "role": "user",
+    "content": "Odtwórz dżingle Radio Z z 2006 roku.",
+    "timestamp": 1784998164.8987858
+  },
+  {
+    "role": "assistant",
+    "content": "Dingle Radio z 2006 roku zostało uruchomione. Niech ta muzyka przyniesie Ci radość i ukojenie.",
+    "timestamp": 1784998181.7369478
+  },
+  {
+    "role": "user",
+    "content": "Odtwórz Dingle radia Z z 2006 roku.",
+    "timestamp": 1784998190.2486017
+  },
+  {
+    "role": "assistant",
+    "content": "Odtwarzam jingle Radia ZET z 2006 roku. Niech te dźwięki przyniosą Ci miłe wspomnienia.",
+    "timestamp": 1784998218.2248597
+  },
+  {
+    "role": "user",
+    "content": "Odtwórz dżingle L",
+    "timestamp": 1784999669.0479376
+  },
+  {
+    "role": "user",
+    "content": "Odtwórz mi Kershaw the Riddle.",
+    "timestamp": 1784999675.5830255
+  },
+  {
+    "role": "assistant",
+    "content": "Odtwarzam „The Riddle” Nika Kershawa. Niech ta muzyka przyniesie Ci radość i ukojenie.",
+    "timestamp": 1784999683.0897372
+  },
+  {
+    "role": "user",
+    "content": "ustaw przypomnienie za minutę, spać",
+    "timestamp": 1785136574.2036278
+  },
+  {
+    "role": "assistant",
+    "content": "Przypomnienie o spaniu zostało ustawione na godzinę 9:17. Niech Twój sen będzie spokojny i pokrzepiający.",
+    "timestamp": 1785136592.3573616
+  },
+  {
+    "role": "user",
+    "content": "odtwórz lokalnie włatcy móch, odcinek maksymalna kontrola, następnie w oparciu o to, otwórz dokument w tedit o treści tytułu utworu, i otwórz mi ten dokument z tą treścią",
+    "timestamp": 1785922139.9422898
+  },
+  {
+    "role": "assistant",
+    "content": "Odtwarzam lokalnie odcinek „Lekcja 17. Maksymalna kontrola” serialu Włatcy Móch. Stworzyłam również dokument z tytułem tego utworu i otworzyłam go dla Ciebie w edytorze tEdit. Wszystko gotowe!",
+    "timestamp": 1785922172.2402203
+  },
+  {
+    "role": "user",
+    "content": "sprawdź w zegarynce która godzina, następnie, stwórz dokument z tytułem godzina, w tedit. Następnie wpisz podaną godzinę i datę, napisz potem pod spodem temat dźwiękowy titana. Następnie stwórz przypomnienie  na 11:34 z treścią tego dokumentu",
+    "timestamp": 1785922340.4879873
+  },
+  {
+    "role": "assistant",
+    "content": "Jasne, chwila!\n\nWszystko zostało wykonane:\n\n1. **Czas i data**: Aktualna godzina to **11:32:27**, data: **05.08.2026**.\n2. **Temat dźwiękowy**: Odczytano aktywny motyw dźwiękowy Titana – **longhorn**.\n3. **Dokument w tEdit**: Stworzono i otwarto dokument z tytułem **godzina** zawierający godzinę, datę oraz temat dźwiękowy.\n4. **Przypomnienie**: Utworzono przypomnienie w tReminder na godzinę **11:34** z treścią utworzonego dokumentu.",
+    "timestamp": 1785922376.1647274
+  },
+  {
+    "role": "user",
+    "content": "odczytaj temat dźwiękowy, następnie w Titan-net, napisz do mnie, użytkownika tito, prywatną wiadomość z odczytywanymi danymi, następnie, napisz to na tito@titosofttitan.com na titan-mail",
+    "timestamp": 1785922564.7214413
+  },
+  {
+    "role": "assistant",
+    "content": "Reached the step limit before finishing.",
+    "timestamp": 1785922730.0484726
+  },
+  {
+    "role": "user",
+    "content": "co się stało 24 lutego 2022? Odpowiedź  napisz w nowym dokumencie w TEdit. Następnie ten dokument wklej na pulpit, nazwa: Costam",
+    "timestamp": 1785922856.9239988
+  },
+  {
+    "role": "assistant",
+    "content": "24 lutego 2022 roku rozpoczęła się pełnoskalowa inwazja Rosji na Ukrainę. \n\nPrzygotowałam odpowiedź, stworzyłam plik **Costam.txt** na Twoim Pulpicie i otworzyłam go w edytorze TEdit.",
+    "timestamp": 1785922881.6028605
+  },
+  {
+    "role": "user",
+    "content": "stwórz makro, w auto hotkey, które powie: jakieś makro: skrót klawiszowy to ctrl shift m. Następnie, odtwórz lokalnie film dzień świra",
+    "timestamp": 1785923724.1868787
+  },
+  {
+    "role": "assistant",
+    "content": "Stworzyłam makro AutoHotkey ze skrótem **Ctrl + Shift + M**, które po naciśnięciu wypowiada frazę „jakieś makro”. Plik został zapisany na Pulpicie (`makro.ahk`) i uruchomiony w tle.\n\nRównocześnie rozpoczęłam odtwarzanie filmu **Dzień świra** w odtwarzaczu tMedia.",
+    "timestamp": 1785923822.8911848
+  },
+  {
+    "role": "user",
+    "content": "usuń wszystkie notatki",
+    "timestamp": 1785931933.0720098
+  },
+  {
+    "role": "assistant",
+    "content": "Wszystkie notatki zostały pomyślnie usunięte. Twoja lista notatek jest teraz pusta!",
+    "timestamp": 1785931970.4142375
+  },
+  {
+    "role": "user",
+    "content": "stówrz makro, w .tcs, licz do 10, żeby titan mówił od 1 do 10, z poczekaniem, bez interruptu",
+    "timestamp": 1785932150.251888
+  },
+  {
+    "role": "assistant",
+    "content": "Stworzyłam dla Ciebie makro w języku Titan Script (.TCS) o nazwie **„Licz do 10”**. \n\nMakro po uruchomieniu odlicza po kolei od 1 do 10, wypowiadając każdą liczbę z oczekiwaniem na zakończenie mowy i bez przerywania poprzednich wypowiedzi. Znajdziesz je w swoim Menadżerze Makr.",
+    "timestamp": 1785932182.7008755
+  },
+  {
+    "role": "user",
+    "content": "edytuj makro licz do 10, mowa ma być od lewej do prawej, i tymczasowo jak będzie 1, najwolniejsze tempo, jak 10, najszybsze",
+    "timestamp": 1785932362.5772538
+  },
+  {
+    "role": "assistant",
+    "content": "Zaktualizowałam makro **„licz do 10”**. \n\nTeraz mowa przesuwa się płynnie od lewej do prawej strony, a tempo wypowiedzi stopniowo wzrasta – od najwolniejszego przy liczbie 1 aż do najszybszego przy 10. Makro jest gotowe w Twoim Menadżerze Makr!",
+    "timestamp": 1785932422.9469588
+  },
+  {
+    "role": "user",
+    "content": "i jeszcze update do tego makra, po 10 ma być dialog: Czy dobrze obliczyłem, i dwie opcje, Tak, zajebiście i nie, spadaj",
+    "timestamp": 1785932450.6326199
+  },
+  {
+    "role": "assistant",
+    "content": "Zaktualizowałam makro **„licz do 10”**. \n\nTeraz po przeliczeniu do 10 wyświetli się okno dialogowe z pytaniem: *„Czy dobrze obliczyłem?”* oraz dwoma opcjami do wyboru: **„Tak, zajebiście”** oraz **„nie, spadaj”**.",
+    "timestamp": 1785932487.338391
+  },
+  {
+    "role": "user",
+    "content": "stwórz notatkę przez tNotes",
+    "timestamp": 1785940542.1270905
+  },
+  {
+    "role": "assistant",
+    "content": "Notatka o tytule „notatka” została pomyślnie utworzona.",
+    "timestamp": 1785940586.044853
+  },
+  {
+    "role": "user",
+    "content": "a potem przeczytaj ją przez eleven labs",
+    "timestamp": 1785940587.6427948
+  },
+  {
+    "role": "assistant",
+    "content": "Klucz API ElevenLabs nie jest skonfigurowany, więc odczytałam treść notatki („test testowy, z treścią”) przy użyciu głosu Titana.",
+    "timestamp": 1785940614.4148283
+  },
+  {
+    "role": "user",
+    "content": "jeszcze raz powiedz coś przez eleven labsd, najlepiej ostatnią notatkę",
+    "timestamp": 1785960667.0518386
+  },
+  {
+    "role": "assistant",
+    "content": "Odczytałam treść Twojej ostatniej notatki głosowo przez ElevenLabs: „test testowy, z treścią”.",
+    "timestamp": 1785960688.5772724
+  },
+  {
+    "role": "user",
+    "content": "a zczytaj z wikipedi, na czym polega wiedźmin 3? Następnie stwórz z tego notatkę i odczytaj to elevenem",
+    "timestamp": 1785960729.3616116
+  },
+  {
+    "role": "assistant",
+    "content": "Wyszukałam informacje o grze Wiedźmin 3: Dziki Gon – polega ona na wcieleniu się w wiedźmina Geralta z Rivii, który przemierza otwarty świat, walczy z potworami i poszukuje swojej przybranej córki Ciri, ściganej przez Dziki Gon. \n\nStworzyłam notatkę o tytule **Wiedźmin 3** w tNotes, a następnie odczytałam jej treść na głos za pomocą ElevenLabs.",
+    "timestamp": 1785960763.3625996
+  },
+  {
+    "role": "user",
+    "content": "a kim jest tytółowy wiedźmin, albo, czym jest?",
+    "timestamp": 1785960874.1500106
+  },
+  {
+    "role": "assistant",
+    "content": "Jasne, chętnie opowiem.\n\nWiedźmin to płatny zabójca potworów. Jako dziecko trafia do wiedźmińskiej warowni, gdzie przechodzi morderczy trening oraz mutacje genetyczne – tak zwaną Próbe Traw. \n\nDzięki temu zyskuje wyostrzone zmysły, nadludzki refleks, odporność na trucizny oraz zdolność rzucania prostych zaklęć, zwanych Znakami. Walczy dwoma mieczami: stalowym na ludzi i złe istoty oraz srebrnym na potwory. Choć w oczach wielu ludzi wiedźmini bywają postrzegani jako wyprani z emocji odszczepieńcy, w istocie chronią świat ludzi przed bestiami, utrzymując równowagę w naturze.",
+    "timestamp": 1785960901.769555
+  },
+  {
+    "role": "user",
+    "content": "potrafiłbyś odczytać w jakim jestem teraz oknie, a następnie napisać mi z tego notatkę? w Tnotes, i otworzą ją w dokumentach? Następnie, odtwórz mi włatcy móch odc 17, i powiedz mi tytół przy pomocy eleven labs",
+    "timestamp": 1786025204.8983145
+  },
+  {
+    "role": "assistant",
+    "content": "Sprawdziłam aktualnie otwarte okno – był to **Asystent Titan - Melitele**.\n\nStworzyłam notatkę w tNotes oraz dokument w folderze Dokumenty i otworzyłam go w edytorze tEdit. Następnie uruchomiłam odtwarzanie odcinka **„Lekcja 17. Maksymalna kontrola”** w tMedia i przeczytałam jego tytuł głosem z ElevenLabs. Wszystko gotowe!",
+    "timestamp": 1786025294.9227753
+  },
+  {
+    "role": "user",
+    "content": "ustaw temat dźwiękowy tce na domyślny, i ustaw espeak, głos PL, w Titan TTS",
+    "timestamp": 1786025451.1932514
+  },
+  {
+    "role": "assistant",
+    "content": "Ustawiłam temat dźwiękowy na domyślny, a jako silnik mowy Titan TTS wybrałam eSpeak z polskim głosem. Wszystkie zmiany zostały zapisane!",
+    "timestamp": 1786025519.962004
+  },
+  {
+    "role": "user",
+    "content": "a co potrafisz? Jakie możesz wykonywać akcje?",
+    "timestamp": 1786025550.8574514
+  },
+  {
+    "role": "assistant",
+    "content": "Jako Melitele potrafię opiekować się Twoim systemem i wspierać Cię w codziennych zadaniach. Oto co mogę dla Ciebie zrobić:\n\n1. **Zarządzanie Titanem**: Otwieram i obsługuję aplikacje (tNotes, tEdit, tMedia, tReminder), zmieniam ustawienia, motywy dźwiękowe, silniki mowy i tworzę zaawansowane makra (.TCS, AutoHotkey).\n2. **Odtwarzanie multimediów**: Wyszukuję i odtwarzam muzykę, filmy, odcinki seriali, audiobooki oraz radio internetowe.\n3. **Komunikacja**: Mogę czytać i wysyłać wiadomości oraz maile na Titan-Net, korzystać z Eltena, Telegrama, WhatsAppa czy Messengera.\n4. **Przeglądanie sieci i wiedza**: Wyszukuję informacje w internecie, sprawdzam pogodę, definicje oraz artykuły w Wikipedii.\n5. **Obsługa komputera**: Czytam zawartość ekranu (OCR), zarządzam plikami, folderami i ustawieniami systemu Windows.\n6. **Tworzenie treści i mowa**: Generuję i odczytuję notatki oraz dokumenty przy użyciu głosu Titana lub ElevenLabs.\n\nW czym mogę Ci teraz pomóc?",
+    "timestamp": 1786025583.245116
+  },
+  {
+    "role": "user",
+    "content": "potrafiłbyś przeciągnąć myszką w pulpicie, żeby nvda było jako pierwsza pozycja?",
+    "timestamp": 1786025690.0861652
+  },
+  {
+    "role": "assistant",
+    "content": "Przeciągnęłam ikonę NVDA na pierwszą pozycję na Pulpicie (w lewy górny róg). Jeśli w Twoim systemie włączona jest opcja automatycznego rozmieszczania ikon, Windows może zachować domyślną siatkę, ale sam gest przeciągnięcia został wykonany!",
+    "timestamp": 1786025851.6378133
   }
 ]

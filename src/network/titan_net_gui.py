@@ -12,6 +12,7 @@ from src.network.titan_net import TitanNetClient
 import os
 import tempfile
 from src.titan_core.sound import play_sound, play_sound_file, initialize_sound
+from src.titan_core import titan_package
 
 # Guarantee the pygame mixer is initialized even when Titan-Net is opened
 # from a context where the main TCE GUI never ran (launcher mode, direct
@@ -800,270 +801,12 @@ class AccountEmailDialog(wx.Dialog):
                                    wx.OK | wx.ICON_ERROR)
 
 
-class ComposeMailDialog(wx.Dialog):
-    """Compose a new message from the user's username@domain identity."""
-
-    def __init__(self, parent, titan_client: TitanNetClient, to_addr: str = "",
-                 subject: str = "", body: str = ""):
-        super().__init__(parent, title=_("Compose Mail"), size=(560, 460))
-        self.titan_client = titan_client
-        self.sent = False
-        self.InitUI(to_addr, subject, body)
-        self.Centre()
-        try:
-            _apply_skin_recursive(self)
-        except Exception:
-            pass
-        self.Bind(wx.EVT_CHAR_HOOK, self.OnKeyPress)
-        play_sound('ui/dialog.ogg')
-
-    def InitUI(self, to_addr, subject, body):
-        panel = wx.Panel(self)
-        vbox = wx.BoxSizer(wx.VERTICAL)
-
-        vbox.Add(wx.StaticText(panel, label=_("To (username@domain or email):")), flag=wx.LEFT | wx.TOP, border=10)
-        self.to_text = wx.TextCtrl(panel, value=to_addr)
-        self.to_text.Bind(wx.EVT_SET_FOCUS, self.OnFocus)
-        vbox.Add(self.to_text, flag=wx.EXPAND | wx.LEFT | wx.RIGHT, border=10)
-
-        vbox.Add(wx.StaticText(panel, label=_("Subject:")), flag=wx.LEFT | wx.TOP, border=10)
-        self.subject_text = wx.TextCtrl(panel, value=subject)
-        self.subject_text.Bind(wx.EVT_SET_FOCUS, self.OnFocus)
-        vbox.Add(self.subject_text, flag=wx.EXPAND | wx.LEFT | wx.RIGHT, border=10)
-
-        vbox.Add(wx.StaticText(panel, label=_("Message:")), flag=wx.LEFT | wx.TOP, border=10)
-        self.body_text = wx.TextCtrl(panel, value=body, style=wx.TE_MULTILINE)
-        self.body_text.Bind(wx.EVT_SET_FOCUS, self.OnFocus)
-        vbox.Add(self.body_text, proportion=1, flag=wx.EXPAND | wx.ALL, border=10)
-
-        btn_box = wx.BoxSizer(wx.HORIZONTAL)
-        self.send_button = wx.Button(panel, wx.ID_ANY, _("Send"))
-        self.send_button.Bind(wx.EVT_BUTTON, self.OnSend)
-        self.send_button.Bind(wx.EVT_SET_FOCUS, self.OnFocus)
-        btn_box.Add(self.send_button, flag=wx.RIGHT, border=10)
-        btn_box.Add(wx.Button(panel, wx.ID_CANCEL, _("Cancel")))
-        vbox.Add(btn_box, flag=wx.ALIGN_CENTER | wx.ALL, border=10)
-
-        panel.SetSizer(vbox)
-
-    def OnFocus(self, event):
-        play_sound('core/FOCUS.ogg', pan=0.5)
-        event.Skip()
-
-    def OnKeyPress(self, event):
-        if event.GetKeyCode() == wx.WXK_ESCAPE:
-            play_sound('core/SELECT.ogg')
-            self.EndModal(wx.ID_CANCEL)
-        else:
-            event.Skip()
-
-    def OnSend(self, event):
-        play_sound('core/SELECT.ogg')
-        to_addr = self.to_text.GetValue().strip()
-        subject = self.subject_text.GetValue().strip()
-        body = self.body_text.GetValue()
-        if not to_addr:
-            speak_titannet(_("Please enter a recipient"))
-            play_sound('core/error.ogg')
-            return
-        self.send_button.Enable(False)
-        speak_titannet(_("Sending..."))
-
-        def _do():
-            result = self.titan_client.send_mail(to_addr, subject, body)
-            wx.CallAfter(self._on_sent, result)
-        threading.Thread(target=_do, daemon=True).start()
-
-    def _on_sent(self, result):
-        if result.get('success'):
-            play_sound('core/SELECT.ogg')
-            speak_titannet(_("Message sent"))
-            self.sent = True
-            self.EndModal(wx.ID_OK)
-        else:
-            self.send_button.Enable(True)
-            play_sound('core/error.ogg')
-            speak_titannet(result.get('error', _('Send failed')))
-            _show_titannet_message(self, result.get('error', _('Send failed')), _("Compose Mail"),
-                                   wx.OK | wx.ICON_ERROR)
-
-
-class MailWindow(wx.Frame):
-    """The user's mailbox (username@domain): inbox, sent folder, compose."""
-
-    def __init__(self, parent, titan_client: TitanNetClient):
-        super().__init__(parent, title=_("Titan-Net Mail"), size=(760, 520))
-        self.titan_client = titan_client
-        self.folder = 'inbox'
-        self._messages = []
-        self.address = ''
-        self.InitUI()
-        self.Centre()
-        try:
-            _apply_skin_recursive(self)
-        except Exception:
-            pass
-        try:
-            from src.ui.window_switcher import register_window
-            register_window("Titan-Net Mail", window=self, category='messenger')
-        except Exception:
-            pass
-        self.Bind(wx.EVT_CHAR_HOOK, self.OnKeyPress)
-        play_sound('ui/window_open.ogg')
-        wx.CallAfter(self.load_messages)
-
-    def InitUI(self):
-        panel = wx.Panel(self)
-        vbox = wx.BoxSizer(wx.VERTICAL)
-
-        self.address_label = wx.StaticText(panel, label=_("Your address: loading..."))
-        vbox.Add(self.address_label, flag=wx.ALL, border=8)
-
-        folder_box = wx.BoxSizer(wx.HORIZONTAL)
-        folder_box.Add(wx.StaticText(panel, label=_("Folder:")), flag=wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, border=6)
-        self.folder_choice = wx.Choice(panel, choices=[_("Inbox"), _("Sent")])
-        self.folder_choice.SetSelection(0)
-        self.folder_choice.Bind(wx.EVT_CHOICE, self.OnFolderChange)
-        folder_box.Add(self.folder_choice)
-        vbox.Add(folder_box, flag=wx.LEFT | wx.BOTTOM, border=8)
-
-        self.mail_list = wx.ListCtrl(panel, style=wx.LC_REPORT | wx.LC_SINGLE_SEL)
-        self.mail_list.AppendColumn(_("From/To"), width=240)
-        self.mail_list.AppendColumn(_("Subject"), width=320)
-        self.mail_list.AppendColumn(_("Date"), width=150)
-        self.mail_list.Bind(wx.EVT_LIST_ITEM_ACTIVATED, lambda e: self.OnRead())
-        vbox.Add(self.mail_list, proportion=1, flag=wx.EXPAND | wx.ALL, border=8)
-
-        btn_box = wx.BoxSizer(wx.HORIZONTAL)
-        for label, handler in (
-            (_("Read"), lambda e: self.OnRead()),
-            (_("Compose"), lambda e: self.OnCompose()),
-            (_("Delete"), lambda e: self.OnDelete()),
-            (_("Refresh"), lambda e: self.load_messages()),
-            (_("Close"), lambda e: self.Close()),
-        ):
-            btn = wx.Button(panel, label=label)
-            btn.Bind(wx.EVT_BUTTON, handler)
-            btn_box.Add(btn, flag=wx.RIGHT, border=6)
-        vbox.Add(btn_box, flag=wx.ALIGN_CENTER | wx.ALL, border=8)
-
-        panel.SetSizer(vbox)
-
-    def OnKeyPress(self, event):
-        keycode = event.GetKeyCode()
-        if keycode == wx.WXK_ESCAPE or (keycode == wx.WXK_F4 and event.AltDown()):
-            self.Close()
-        else:
-            event.Skip()
-
-    def OnFolderChange(self, event):
-        self.folder = 'sent' if self.folder_choice.GetSelection() == 1 else 'inbox'
-        self.load_messages()
-
-    def load_messages(self):
-        play_sound('core/SELECT.ogg')
-
-        def _do():
-            result = self.titan_client.get_mailbox(self.folder)
-            wx.CallAfter(self._display, result)
-        threading.Thread(target=_do, daemon=True).start()
-
-    def _display(self, result):
-        self.mail_list.DeleteAllItems()
-        if not result.get('success'):
-            play_sound('core/error.ogg')
-            speak_titannet(result.get('error', _('Could not load mail')))
-            return
-        self.address = result.get('address', '')
-        self.address_label.SetLabel(_("Your address: {address}").format(address=self.address))
-        self._messages = result.get('messages', [])
-        for m in self._messages:
-            who = m.get('from_addr') if self.folder == 'inbox' else m.get('to_addr')
-            subject = m.get('subject') or _("(no subject)")
-            if self.folder == 'inbox' and not m.get('read'):
-                subject = "* " + subject
-            idx = self.mail_list.InsertItem(self.mail_list.GetItemCount(), who or '')
-            self.mail_list.SetItem(idx, 1, subject)
-            self.mail_list.SetItem(idx, 2, (m.get('received_at') or '')[:16].replace('T', ' '))
-            self.mail_list.SetItemData(idx, m.get('id', 0))
-        if self._messages:
-            self.mail_list.SetItemState(0, wx.LIST_STATE_SELECTED, wx.LIST_STATE_SELECTED)
-
-    def _selected_id(self):
-        sel = self.mail_list.GetFirstSelected()
-        if sel == -1:
-            return None
-        return self.mail_list.GetItemData(sel)
-
-    def OnRead(self):
-        mail_id = self._selected_id()
-        if mail_id is None:
-            return
-        play_sound('core/SELECT.ogg')
-
-        def _do():
-            result = self.titan_client.get_mail(mail_id)
-            wx.CallAfter(self._show_message, result)
-        threading.Thread(target=_do, daemon=True).start()
-
-    def _show_message(self, result):
-        if not result.get('success'):
-            play_sound('core/error.ogg')
-            speak_titannet(result.get('error', _('Could not open message')))
-            return
-        m = result.get('message', {})
-        text = "{}: {}\n{}: {}\n{}: {}\n\n{}".format(
-            _("From"), m.get('from_addr', ''),
-            _("To"), m.get('to_addr', ''),
-            _("Subject"), m.get('subject', ''),
-            m.get('body', ''))
-        dlg = wx.Dialog(self, title=m.get('subject') or _("Message"), size=(600, 460))
-        panel = wx.Panel(dlg)
-        v = wx.BoxSizer(wx.VERTICAL)
-        tc = wx.TextCtrl(panel, value=text, style=wx.TE_MULTILINE | wx.TE_READONLY)
-        v.Add(tc, proportion=1, flag=wx.EXPAND | wx.ALL, border=10)
-        reply_btn = wx.Button(panel, wx.ID_ANY, _("Reply"))
-        reply_btn.Bind(wx.EVT_BUTTON, lambda e: (dlg.EndModal(wx.ID_OK), self._reply(m)))
-        v.Add(reply_btn, flag=wx.ALIGN_CENTER | wx.BOTTOM, border=6)
-        v.Add(wx.Button(panel, wx.ID_CANCEL, _("Close")), flag=wx.ALIGN_CENTER | wx.BOTTOM, border=10)
-        panel.SetSizer(v)
-        try:
-            _apply_skin_recursive(dlg)
-        except Exception:
-            pass
-        tc.SetInsertionPoint(0)
-        dlg.ShowModal()
-        dlg.Destroy()
-        # Refresh so the read marker clears.
-        self.load_messages()
-
-    def _reply(self, m):
-        to_addr = m.get('from_addr', '')
-        subject = m.get('subject', '')
-        if subject and not subject.lower().startswith('re:'):
-            subject = "Re: " + subject
-        quoted = "\n\n> " + (m.get('body', '') or '').replace("\n", "\n> ")
-        dlg = ComposeMailDialog(self, self.titan_client, to_addr, subject, quoted)
-        dlg.ShowModal()
-        dlg.Destroy()
-
-    def OnCompose(self):
-        play_sound('core/SELECT.ogg')
-        dlg = ComposeMailDialog(self, self.titan_client)
-        if dlg.ShowModal() == wx.ID_OK and dlg.sent:
-            self.load_messages()
-        dlg.Destroy()
-
-    def OnDelete(self):
-        mail_id = self._selected_id()
-        if mail_id is None:
-            return
-        play_sound('core/SELECT.ogg')
-
-        def _do():
-            result = self.titan_client.delete_mail(mail_id)
-            wx.CallAfter(lambda: self.load_messages() if result.get('success') else None)
-        threading.Thread(target=_do, daemon=True).start()
+# The mailbox UI lives in src/network/mail_gui.py: the same TabbedListFrame the
+# Titan IM clients use (tab bar in row 0, Left/Right cycles it, Enter opens,
+# Escape goes back one level), with HTML / Markdown / plain bodies parsed into
+# navigable rows by src/network/mail_format.py. It is imported where it is
+# opened rather than here, so a fault in the mail client can never stop
+# Titan-Net itself from loading.
 
 
 class CreateAccountDialog(wx.Dialog):
@@ -1682,6 +1425,16 @@ class TitanNetMainWindow(wx.Frame):
         self.is_moderator = False
         self.is_developer = False
 
+        # Ids of users this account has blocked ("full ignore"). Kept in sync so
+        # the per-user context menu can offer Block vs Unblock. Populated in the
+        # background after connect via refresh_blocked_users().
+        self.blocked_user_ids = set()
+
+        # Screens this server defines for itself (Remote UI). Fetched in the
+        # background after connect; the Server menu is built from the cache so
+        # opening a menu never waits on the network.
+        self.remote_screens = []
+
         # Auto-refresh settings
         self.auto_refresh_enabled = True
         self.auto_refresh_interval = 15  # seconds - faster refresh for responsive UI
@@ -2060,6 +1813,9 @@ class TitanNetMainWindow(wx.Frame):
             sel = self.main_listbox.GetSelection()
             grp = self._group_by_id(self.main_listbox.GetClientData(sel)) if sel != wx.NOT_FOUND else None
             if grp:
+                if grp.get('my_role') in ('owner', 'moderator'):
+                    manage_group_item = user_menu.Append(wx.ID_ANY, _("Manage Group"))
+                    self.Bind(wx.EVT_MENU, lambda e, g=grp: self._mod_manage_group(g), manage_group_item)
                 if grp.get('my_status') == 'active' and grp.get('my_role') != 'owner':
                     leave_item = user_menu.Append(wx.ID_ANY, _("Leave Group"))
                     self.Bind(wx.EVT_MENU, lambda e: self._user_leave_group(), leave_item)
@@ -2074,12 +1830,19 @@ class TitanNetMainWindow(wx.Frame):
                 self.Bind(wx.EVT_MENU, lambda e: self._user_create_forum(), create_forum_item)
                 pending_item = user_menu.Append(wx.ID_ANY, _("Manage Pending Members"))
                 self.Bind(wx.EVT_MENU, lambda e: self._mod_manage_pending_members(), pending_item)
-                manage_item = user_menu.Append(wx.ID_ANY, _("Manage Members"))
+                manage_item = user_menu.Append(wx.ID_ANY, _("Manage Group"))
                 self.Bind(wx.EVT_MENU, lambda e: self._mod_manage_members(), manage_item)
                 user_menu.AppendSeparator()
         elif self.current_view == "forum":
             create_topic_item = user_menu.Append(wx.ID_ANY, _("Create New Thread"))
             self.Bind(wx.EVT_MENU, lambda e: self._user_create_topic(), create_topic_item)
+            grp = getattr(self, 'current_group', None)
+            if (grp and grp.get('my_role') in ('owner', 'moderator')
+                    and self.main_listbox.GetSelection() != wx.NOT_FOUND):
+                # Group moderators/owners may delete threads in their own
+                # group's forums even without server-wide moderator rights.
+                delete_topic_item = user_menu.Append(wx.ID_ANY, _("Delete Thread"))
+                self.Bind(wx.EVT_MENU, lambda e: self._mod_delete_selected_topic(), delete_topic_item)
             user_menu.AppendSeparator()
 
         view_all_users_item = user_menu.Append(wx.ID_ANY, _("View All Users"))
@@ -2183,6 +1946,26 @@ class TitanNetMainWindow(wx.Frame):
                     components_menu.AppendSubMenu(submenu, name)
             menubar.Append(components_menu, _("Components"))
 
+        # Server menu — screens this server defines for itself, rendered by
+        # the generic Remote UI renderer. The entries come from the server,
+        # so a brand new tool appears here without updating Titan.
+        server_screens = getattr(self, 'remote_screens', []) or []
+        if server_screens or self.is_moderator or self.is_developer:
+            server_menu = wx.Menu()
+            for screen in server_screens:
+                item = server_menu.Append(wx.ID_ANY, screen.get('title') or screen['slug'])
+                self.Bind(wx.EVT_MENU,
+                          lambda e, s=screen['slug']: self._open_remote_screen(s), item)
+            if server_screens and (self.is_moderator or self.is_developer):
+                server_menu.AppendSeparator()
+            if self.is_moderator or self.is_developer:
+                sounds_item = server_menu.Append(wx.ID_ANY, _("Server Sounds"))
+                self.Bind(wx.EVT_MENU, lambda e: self._show_server_sounds(), sounds_item)
+            refresh_item = server_menu.Append(wx.ID_ANY, _("Refresh Server Screens"))
+            self.Bind(wx.EVT_MENU,
+                      lambda e: self.refresh_remote_screens(announce=True), refresh_item)
+            menubar.Append(server_menu, _("Server"))
+
         self.SetMenuBar(menubar)
 
     def apply_skin(self):
@@ -2192,8 +1975,96 @@ class TitanNetMainWindow(wx.Frame):
         except Exception as e:
             print(f"Error applying skin to Titan-Net window: {e}")
 
+    def refresh_blocked_users(self):
+        """Load (in the background) the set of users this account has blocked so
+        the per-user context menu can offer Block vs Unblock correctly."""
+        def _fetch():
+            try:
+                result = self.titan_client.get_blocked_users()
+                if result and result.get('success'):
+                    ids = {u['id'] for u in result.get('users', [])}
+                    wx.CallAfter(setattr, self, 'blocked_user_ids', ids)
+            except Exception as e:
+                print(f"Error loading blocked users: {e}")
+        threading.Thread(target=_fetch, daemon=True).start()
+
+    # ------------------------------------------------------------------
+    # Remote UI + server sounds
+    # ------------------------------------------------------------------
+
+    def refresh_remote_screens(self, announce: bool = False):
+        """Reload the server's screen list and rebuild the Server menu.
+
+        Runs in the background: a server that has no Remote UI screens (or is
+        an older build that never heard of them) simply contributes nothing.
+        """
+        def _fetch():
+            try:
+                from src.network import remote_ui
+                screens = remote_ui.list_menu_screens(self.titan_client)
+            except Exception as e:
+                print(f"Error loading remote screens: {e}")
+                screens = []
+            wx.CallAfter(self._apply_remote_screens, screens, announce)
+
+        threading.Thread(target=_fetch, daemon=True).start()
+
+    def _apply_remote_screens(self, screens, announce: bool = False):
+        self.remote_screens = screens or []
+        try:
+            self.update_menu_bar()
+        except Exception as e:
+            print(f"Error rebuilding menu for remote screens: {e}")
+        if announce:
+            count = len(self.remote_screens)
+            if count:
+                speak_notification(
+                    _("{n} server screens available").format(n=count), 'success')
+            else:
+                speak_notification(_("This server has no screens"), 'info')
+
+    def _open_remote_screen(self, slug: str):
+        try:
+            from src.network import remote_ui
+            remote_ui.open_screen(self, self.titan_client, slug)
+        except Exception as e:
+            print(f"Error opening remote screen {slug}: {e}")
+            speak_notification(_("Could not open that screen"), 'error')
+
+    def _on_remote_screen_push(self, message):
+        """The server opened one of its screens on us, unprompted."""
+        try:
+            from src.network import remote_ui
+            remote_ui.handle_push(self, self.titan_client, message)
+        except Exception as e:
+            print(f"Error handling pushed remote screen: {e}")
+
+    def _on_server_sound(self, message):
+        """The server asked this machine to play one of its sounds."""
+        try:
+            from src.network import server_sounds
+            server_sounds.play(self.titan_client, message)
+        except Exception as e:
+            print(f"Error playing server sound: {e}")
+
+    def _show_server_sounds(self):
+        """Staff: manage the server's sound registry and play sounds at users."""
+        try:
+            from src.network.server_sounds_gui import ServerSoundsDialog
+        except Exception as e:
+            print(f"Error loading server sounds dialog: {e}")
+            speak_notification(_("Could not open server sounds"), 'error')
+            return
+        dlg = ServerSoundsDialog(self, self.titan_client)
+        try:
+            dlg.ShowModal()
+        finally:
+            dlg.Destroy()
+
     def load_user_role(self):
         """Load user role - use cached role from login response first, then fetch from server"""
+        # Blocked-users list is independent of role; load it once on startup.
+        self.refresh_blocked_users()
         # Check if role was already set from login response
         cached_role = getattr(self.titan_client, 'user_role', None)
         if cached_role and cached_role != 'user':
@@ -2253,10 +2124,11 @@ class TitanNetMainWindow(wx.Frame):
             # text-only rooms when the multiline message_input had focus.
             if self.current_view == "menu":
                 wx.CallAfter(self.Hide)
-            elif self.current_view in ["room_chat", "private_chat"]:
-                wx.CallAfter(self.OnBack, None)
             else:
-                wx.CallAfter(self.show_menu)
+                # OnBack already knows the hierarchical route (e.g.
+                # forum -> group_forums -> groups -> menu) and falls back to
+                # show_menu() itself for flat views.
+                wx.CallAfter(self.OnBack, None)
         else:
             event.Skip()
 
@@ -2287,8 +2159,21 @@ class TitanNetMainWindow(wx.Frame):
         self.titan_client.on_feedback_new = self._on_feedback_new_global
         self.titan_client.on_feedback_status_changed = self._on_feedback_status_global
 
+        # Forum thread moves: the author hears where their thread went, and the
+        # target group's moderators hear that a move is waiting for them.
+        self.titan_client.on_forum_topic_moved = self._on_forum_topic_moved
+        self.titan_client.on_forum_move_request = self._on_forum_move_request
+
         # New user broadcast callback
         self.titan_client.on_new_user_broadcast = self.on_new_user_broadcast
+
+        # Remote UI: the server may open one of its own screens on us, and
+        # may ask us to play one of its sounds. Both arrive as plain data —
+        # a screen description and a sound name — so a server feature added
+        # after this client was built still works here.
+        self.titan_client.on_remote_screen_push = self._on_remote_screen_push
+        self.titan_client.on_server_sound = self._on_server_sound
+        self.refresh_remote_screens()
 
         # Moderator component runtime (event bus). Loads enabled components so
         # their hooks (on_message/on_tick/...) fire on live Titan-Net events.
@@ -2356,6 +2241,7 @@ class TitanNetMainWindow(wx.Frame):
             _("Chat Rooms"),
             _("Online Users"),
             _("Private Messages"),
+            _("Blocked Users"),
             _("Mail"),
             _("Forum"),
             _("App Repository"),
@@ -2757,7 +2643,12 @@ class TitanNetMainWindow(wx.Frame):
                         count=g.get('member_count', 0), status=self._group_status_label(g))
                     self.main_listbox.Append(display, clientData=g.get('id'))
                 if self.main_listbox.GetCount() > 0:
+                    # SetSelection() does not fire EVT_LISTBOX, so the Actions
+                    # menu (which depends on the selected group's role) would
+                    # otherwise stay stale until the user manually changes
+                    # the selection. Refresh it explicitly here.
                     self.main_listbox.SetSelection(0)
+                    self.update_menu_bar()
         except Exception as e:
             print(f"Error updating groups list: {e}")
 
@@ -2894,9 +2785,10 @@ class TitanNetMainWindow(wx.Frame):
             _("Pending Packages (Preview)"),
         ]
 
-        # Add moderation option for moderators/developers
+        # Add moderation options for moderators/developers
         if self.is_moderator:
             repo_items.append(_("Moderate Packages"))
+            repo_items.append(_("Moderate Components"))
 
         for item in repo_items:
             self.main_listbox.Append(item)
@@ -3189,6 +3081,13 @@ class TitanNetMainWindow(wx.Frame):
             pan = selection / (count - 1)
         play_sound('core/FOCUS.ogg', pan=pan)
 
+        # The Actions/Moderation menus are built from the currently selected
+        # item (e.g. "Manage Group" only for the selected group's role), so
+        # they must be refreshed on every selection change, not just when the
+        # view is first entered.
+        if listbox is self.main_listbox:
+            self.update_menu_bar()
+
         # Check if current view is forum and if selected topic has new replies
         if listbox is self.main_listbox and self.current_view == "forum":
             topic = self._forum_topic_for_selection(selection)
@@ -3222,12 +3121,10 @@ class TitanNetMainWindow(wx.Frame):
             # Backup Escape route from any list (room users, etc.). Routes the
             # same as the Frame-level OnKeyPress handler so users can always
             # leave a room even if the Frame's EVT_CHAR_HOOK is bypassed.
-            if self.current_view in ["room_chat", "private_chat"]:
-                wx.CallAfter(self.OnBack, None)
-            elif self.current_view == "menu":
+            if self.current_view == "menu":
                 wx.CallAfter(self.Hide)
             else:
-                wx.CallAfter(self.show_menu)
+                wx.CallAfter(self.OnBack, None)
             return
         elif keycode in (wx.WXK_UP, wx.WXK_DOWN, wx.WXK_LEFT, wx.WXK_RIGHT):
             # Navigation keys - check for edge
@@ -3263,7 +3160,14 @@ class TitanNetMainWindow(wx.Frame):
         if self.current_view == "menu":
             # Component contributions carry their run callable as client data;
             # run it directly so enabled components act from the main view.
-            data = self.main_listbox.GetClientData(selection)
+            # GetClientData() raises a wxAssertionError when NO item has ever
+            # had client data set (i.e. no components are installed), so guard
+            # it — otherwise this would abort before the text dispatch below and
+            # leave every main-menu option dead when there are no components.
+            try:
+                data = self.main_listbox.GetClientData(selection)
+            except Exception:
+                data = None
             if callable(data):
                 play_sound('core/SELECT.ogg')
                 data()
@@ -3280,6 +3184,8 @@ class TitanNetMainWindow(wx.Frame):
                 self.show_users_view()
             elif item_text == _("Private Messages"):
                 self.show_private_messages_view()
+            elif item_text == _("Blocked Users"):
+                self.show_blocked_users_dialog()
             elif item_text == _("Mail"):
                 self.open_mail_window()
             elif item_text == _("Forum"):
@@ -3356,6 +3262,8 @@ class TitanNetMainWindow(wx.Frame):
                 self.show_pending_apps(preview_mode=True)
             elif item_text == _("Moderate Packages"):
                 self.show_pending_apps(preview_mode=False)
+            elif item_text == _("Moderate Components"):
+                self.show_moderate_components()
 
         elif self.current_view == "repository":
             # Show app details
@@ -3645,14 +3553,14 @@ class TitanNetMainWindow(wx.Frame):
             current_view = getattr(self, 'current_view', None)
             if current_view == "menu":
                 self.Hide()
-            elif current_view in ["room_chat", "private_chat"]:
-                self.OnBack(None)
             else:
-                # Any other view (rooms list, forum, etc.) - back to menu.
+                # OnBack knows the hierarchical route (forum -> group_forums
+                # -> groups -> menu) and falls back to show_menu() itself for
+                # flat views (rooms list, room_chat, private_chat, etc.).
                 try:
-                    self.show_menu()
+                    self.OnBack(None)
                 except Exception as e:
-                    print(f"_on_force_back: show_menu failed: {e}")
+                    print(f"_on_force_back: OnBack failed: {e}")
         except Exception as e:
             print(f"_on_force_back error: {e}")
 
@@ -4991,6 +4899,9 @@ class TitanNetMainWindow(wx.Frame):
         avatar_item = menu.Append(wx.ID_ANY, _("Play avatar"))
         self.Bind(wx.EVT_MENU, lambda e: self._play_user_avatar(user['username']), avatar_item)
 
+        # Personal block ("full ignore"), available to everyone.
+        self._append_block_menu_item(menu, user)
+
         # Moderation options for moderators/developers
         # No blocking server call — show all options, server validates on action
         if self.is_moderator or self.is_developer:
@@ -5023,6 +4934,77 @@ class TitanNetMainWindow(wx.Frame):
         self.main_listbox.PopupMenu(menu)
         menu.Destroy()
 
+    def _append_block_menu_item(self, menu, user):
+        """Append a Block/Unblock toggle for ``user`` to a context menu. Shown to
+        every user (not just moderators) — this is a personal 'full ignore', not
+        a moderation ban. You cannot block yourself."""
+        my_id = getattr(self.titan_client, 'user_id', None)
+        if my_id is not None and user.get('id') == my_id:
+            return
+        if user.get('id') in self.blocked_user_ids:
+            item = menu.Append(wx.ID_ANY, _("Unblock user"))
+            self.Bind(wx.EVT_MENU, lambda e: self._context_unblock_user(user), item)
+        else:
+            item = menu.Append(wx.ID_ANY, _("Block user"))
+            self.Bind(wx.EVT_MENU, lambda e: self._context_block_user(user), item)
+
+    def _context_block_user(self, user):
+        """Block a user ('full ignore') — they can no longer PM you and you stop
+        seeing each other's messages and online status."""
+        def _do():
+            result = self.titan_client.block_user(user['id'])
+            wx.CallAfter(self._on_block_result, result, user, True)
+        threading.Thread(target=_do, daemon=True).start()
+
+    def _context_unblock_user(self, user):
+        """Remove a previously set block."""
+        def _do():
+            result = self.titan_client.unblock_user(user['id'])
+            wx.CallAfter(self._on_block_result, result, user, False)
+        threading.Thread(target=_do, daemon=True).start()
+
+    def _on_block_result(self, result, user, blocked):
+        if result and result.get('success'):
+            if blocked:
+                self.blocked_user_ids.add(user['id'])
+                speak_notification(
+                    _("Blocked {user}").format(user=user['username']), 'success')
+                # Drop them from the visible online list right away.
+                if self.current_view in ("users", "private_messages_select"):
+                    self.refresh_users()
+            else:
+                self.blocked_user_ids.discard(user['id'])
+                speak_notification(
+                    _("Unblocked {user}").format(user=user['username']), 'success')
+        else:
+            err = (result or {}).get('error') or (result or {}).get('message') or _("Operation failed")
+            speak_notification(err, 'error')
+
+    def show_blocked_users_dialog(self):
+        """List the users you've blocked and let you unblock them. Needed because
+        blocked users are hidden from the online list, so the context menu can't
+        reach them anymore."""
+        result = self.titan_client.get_blocked_users()
+        if not result or not result.get('success'):
+            err = (result or {}).get('message') or _("Could not load blocked users")
+            speak_notification(err, 'error')
+            return
+        users = result.get('users', [])
+        self.blocked_user_ids = {u['id'] for u in users}
+        if not users:
+            wx.MessageBox(_("You have not blocked anyone."),
+                          _("Blocked Users"), wx.OK | wx.ICON_INFORMATION, self)
+            return
+
+        labels = ["{name} (#{num})".format(name=u['username'], num=u.get('titan_number', '?'))
+                  for u in users]
+        dlg = wx.SingleChoiceDialog(
+            self, _("Select a user to unblock:"), _("Blocked Users"), labels)
+        if dlg.ShowModal() == wx.ID_OK:
+            user = users[dlg.GetSelection()]
+            self._context_unblock_user(user)
+        dlg.Destroy()
+
     def show_user_actions(self, user):
         """Show context menu for user actions (instant — no server calls)"""
         menu = wx.Menu()
@@ -5032,6 +5014,9 @@ class TitanNetMainWindow(wx.Frame):
 
         avatar_item = menu.Append(wx.ID_ANY, _("Play avatar"))
         self.Bind(wx.EVT_MENU, lambda e: self._play_user_avatar(user['username']), avatar_item)
+
+        # Personal block ("full ignore"), available to everyone.
+        self._append_block_menu_item(menu, user)
 
         # Add moderation options if user is moderator or developer
         # No blocking server call — show all options, server validates on action
@@ -5467,6 +5452,37 @@ class TitanNetMainWindow(wx.Frame):
         speak_titannet(text)
         print(f"[TITAN-NET] Feedback Hub: new {item_type} '{title}' by {author}")
 
+    def _on_forum_topic_moved(self, message):
+        """Announce that one of our threads was moved, and where to."""
+        title = message.get('title', '?')
+        to_forum = message.get('to_forum') or _("another forum")
+        from_forum = message.get('from_forum') or _("its previous forum")
+        moved_by = message.get('moved_by') or _("a moderator")
+        try:
+            play_sound('titannet/titannet-notification.ogg')
+        except Exception:
+            pass
+        speak_titannet(_("Your thread {title} was moved from {source} to {destination} by {user}").format(
+            title=title, source=from_forum, destination=to_forum, user=moved_by))
+        print(f"[TITAN-NET] Thread '{title}' moved {from_forum} -> {to_forum} by {moved_by}")
+        if self.current_view == "forum":
+            wx.CallAfter(self.refresh_forum_topics)
+
+    def _on_forum_move_request(self, message):
+        """Announce that a cross-group move is waiting for our approval."""
+        title = message.get('title', '?')
+        to_forum = message.get('to_forum') or _("your forum")
+        from_forum = message.get('from_forum') or _("another forum")
+        requested_by = message.get('requested_by') or _("a moderator")
+        try:
+            play_sound('titannet/titannet-notification.ogg')
+        except Exception:
+            pass
+        speak_titannet(_("{user} asks to move the thread {title} from {source} into {destination}. "
+                         "Approve or reject it in the move requests list.").format(
+            user=requested_by, title=title, source=from_forum, destination=to_forum))
+        print(f"[TITAN-NET] Move request: '{title}' {from_forum} -> {to_forum} by {requested_by}")
+
     def _on_feedback_status_global(self, message):
         """Announce status changes / idea decisions globally."""
         item_type = message.get('item_type', 'feedback')
@@ -5881,22 +5897,55 @@ class TitanNetMainWindow(wx.Frame):
             pass
         return None
 
+    # A 20ms mono frame at 16kHz is 640 bytes of raw PCM; an Opus frame at
+    # 24kbps is roughly 60. The size is therefore what tells the two apart on
+    # the wire, and it is the ONLY thing that may decide - a listener must not
+    # judge an incoming frame by whether its own Opus support happens to be
+    # installed. Doing that meant a listener without opuslib fed a compressed
+    # frame straight into int16 PCM playback, which is a burst of noise instead
+    # of the sender's voice.
+    _OPUS_FRAME_MAX_BYTES = 500
+
     def _decode_and_resample_chunk(self, audio_data: bytes, user_id=None):
-        """Decode Opus chunk. Returns mono int16 numpy array at 16kHz (no resampling needed)."""
+        """Decode one voice frame. Returns mono int16 numpy array at 16kHz."""
         import numpy as np
 
+        if not audio_data:
+            return None
+
         try:
-            # Decode Opus if enabled
-            if hasattr(self, '_use_opus') and self._use_opus and len(audio_data) < 500:
+            if len(audio_data) < self._OPUS_FRAME_MAX_BYTES:
+                # Compressed frame - it can only be played through Opus.
+                decoded = None
                 try:
-                    from src.network.voice_codec import OpusVoiceCodec
-                    if user_id not in self._opus_decoders:
-                        self._opus_decoders[user_id] = OpusVoiceCodec(
-                            sample_rate=16000, channels=1, bitrate=24000, frame_duration_ms=20
-                        )
-                    audio_data = self._opus_decoders[user_id].decode(audio_data)
-                except Exception:
-                    pass  # Fallback: treat as raw PCM
+                    from src.network.voice_codec import OpusVoiceCodec, OPUS_AVAILABLE
+                    if OPUS_AVAILABLE:
+                        if not hasattr(self, '_opus_decoders'):
+                            self._opus_decoders = {}
+                        if user_id not in self._opus_decoders:
+                            self._opus_decoders[user_id] = OpusVoiceCodec(
+                                sample_rate=16000, channels=1, bitrate=24000, frame_duration_ms=20
+                            )
+                        decoded = self._opus_decoders[user_id].decode(audio_data)
+                except Exception as decode_err:
+                    decoded = None
+                    if not getattr(self, '_opus_decode_error_logged', False):
+                        self._opus_decode_error_logged = True
+                        print(f"[VOICE PLAYBACK] Opus decode failed: {decode_err}")
+
+                if not decoded:
+                    # Drop the frame rather than play compressed bytes as PCM.
+                    if not getattr(self, '_opus_missing_logged', False):
+                        self._opus_missing_logged = True
+                        print("[VOICE PLAYBACK] Opus frames received but Opus is "
+                              "unavailable - dropping them. Install opuslib to "
+                              "hear this speaker.")
+                    return None
+                audio_data = decoded
+
+            # Raw PCM path: an odd trailing byte would break int16 framing.
+            if len(audio_data) % 2:
+                audio_data = audio_data[:-1]
 
             audio_array = np.frombuffer(audio_data, dtype=np.int16)
             if len(audio_array) == 0:
@@ -6846,10 +6895,10 @@ class TitanNetMainWindow(wx.Frame):
             print(f"Error managing pending members: {e}")
 
     def open_mail_window(self):
-        """Open the user's mailbox (username@domain) - inbox, sent, compose."""
+        """Open the user's mailbox (username@domain) - inbox, unread, sent."""
         try:
-            win = MailWindow(self, self.titan_client)
-            win.Show()
+            from src.network.mail_gui import show_mail_client
+            show_mail_client(self, self.titan_client)
         except Exception as e:
             print(f"Error opening mail window: {e}")
             speak_titannet(_("Could not open Mail"))
@@ -6872,16 +6921,25 @@ class TitanNetMainWindow(wx.Frame):
         group = getattr(self, 'current_group', None)
         if not group:
             return
+        self._open_manage_group_dialog(group)
+
+    def _mod_manage_group(self, group):
+        """Open the manage dialog (rename, moderators, ban) for a group
+        selected directly from the main groups list, without opening it
+        first."""
+        self._open_manage_group_dialog(group)
+
+    def _open_manage_group_dialog(self, group):
         try:
             from src.network.titan_net_forum_gui import ManageGroupMembersDialog
             my_role = group.get('my_role', 'moderator')
-            dlg = ManageGroupMembersDialog(self, self.titan_client, group['id'], my_role)
+            dlg = ManageGroupMembersDialog(self, self.titan_client, group['id'], my_role, group.get('name'))
             dlg.ShowModal()
             dlg.Destroy()
-            # Ownership may have changed hands; refresh so menus reflect it.
+            # Ownership/name may have changed; refresh so menus/labels reflect it.
             self.refresh_groups()
         except Exception as e:
-            print(f"Error managing members: {e}")
+            print(f"Error managing group: {e}")
 
     def _mod_move_selected_topic_to_forum(self):
         """Move the selected thread to another forum. Within the same group the
@@ -6893,12 +6951,22 @@ class TitanNetMainWindow(wx.Frame):
             return
         topic_id = topic['id']
 
+        topic_title = topic.get('title') or _("this thread")
+        source_forum = topic.get('category') or topic.get('forum_name') or _("its current forum")
+
         def _after_move(res):
             if res.get('success'):
                 if res.get('status') == 'pending':
-                    speak_notification(_("Move request sent for approval by the target group moderators"), 'info')
+                    speak_notification(
+                        _("Move request sent to the moderators of {group} for approval").format(
+                            group=res.get('to_group_name') or res.get('to_forum_name') or _("the target group")),
+                        'info')
                 else:
-                    speak_notification(_("Thread moved"), 'success')
+                    speak_notification(
+                        _("Thread moved from {source} to {destination}").format(
+                            source=res.get('from_forum_name') or source_forum,
+                            destination=res.get('to_forum_name') or _("the selected forum")),
+                        'success')
                     if self.current_view == "forum":
                         self.refresh_forum_topics()
             else:
@@ -6917,6 +6985,23 @@ class TitanNetMainWindow(wx.Frame):
             if dlg.ShowModal() == wx.ID_OK:
                 f = forums[dlg.GetSelection()]
                 dlg.Destroy()
+
+                # Confirm before moving: the destination was picked from two
+                # lists in a row, so say out loud what is about to happen and
+                # where it lands. Moving a thread is visible to everyone reading
+                # the forum, so it should not happen on a mis-selection.
+                confirm = _show_titannet_message(
+                    self,
+                    _("Move the thread '{title}' from '{source}' to '{destination}'?").format(
+                        title=topic_title, source=source_forum, destination=f['name']),
+                    _("Move Thread to Forum"),
+                    wx.YES_NO | wx.ICON_QUESTION,
+                )
+                # ShowModal() result - compare against wx.ID_YES, not wx.YES.
+                if confirm != wx.ID_YES:
+                    speak_notification(_("Move cancelled"), 'info')
+                    return
+
                 threading.Thread(
                     target=lambda: wx.CallAfter(_after_move, self.titan_client.move_topic_to_forum(topic_id, f['id'])),
                     daemon=True).start()
@@ -6954,6 +7039,22 @@ class TitanNetMainWindow(wx.Frame):
             win.Show()
         except Exception as e:
             print(f"Error opening moderator components: {e}")
+            play_sound('core/error.ogg')
+
+    def show_moderate_components(self):
+        """Open the network-component moderation dialog from the App Repository
+        moderation options: approve pending components and disable/enable/delete
+        already-active ones (staff only)."""
+        if not self.is_moderator:
+            speak_notification(_("Only moderators can moderate components"), 'error')
+            return
+        try:
+            from src.network.titan_net_mod_components import ExtensionReviewDialog
+            dlg = ExtensionReviewDialog(self, self.titan_client)
+            dlg.ShowModal()
+            dlg.Destroy()
+        except Exception as e:
+            print(f"Error opening component moderation: {e}")
             play_sound('core/error.ogg')
 
     def _view_all_users(self):
@@ -8532,84 +8633,152 @@ class TitanNetMainWindow(wx.Frame):
 
     # App Repository Methods
 
-    def show_upload_app_dialog(self):
-        """Dialog to upload package"""
-        # Ask for file
-        dlg = wx.FileDialog(
-            self,
-            _("Select package file (.TCEPACKAGE)"),
-            wildcard="TCE Packages (*.TCEPACKAGE)|*.TCEPACKAGE|All files (*.*)|*.*",
-            style=wx.FD_OPEN | wx.FD_FILE_MUST_EXIST
-        )
+    # Kind name (titan_package.KIND_NAMES values) -> repository category
+    # value. Existing category strings ('application', 'status_bar_applet',
+    # ...) predate the .TCA/.TCD format and must not change -- they're
+    # already stored against real uploaded packages. Only the newer kinds
+    # (launcher/im_module/gamepad_mode/tts_engine/widget) get fresh values.
+    _KIND_TO_REPO_CATEGORY = {
+        'app': 'application',
+        'game': 'game',
+        'component': 'component',
+        'launcher': 'launcher',
+        'im_module': 'im_module',
+        'gamepad_mode': 'gamepad_mode',
+        'tts_engine': 'tts_engine',
+        'widget': 'widget',
+        'statusbar_applet': 'status_bar_applet',
+    }
 
-        if dlg.ShowModal() == wx.ID_OK:
+    def _detect_package_kind(self, file_path):
+        """Best-effort .tca/.tcd sniff. Returns (id, category_value) or
+        (None, None) if file_path isn't a recognized Titan package."""
+        try:
+            if titan_package.is_package_file(file_path):
+                header = titan_package.read_header(file_path)
+                category = self._KIND_TO_REPO_CATEGORY.get(header.kind_name)
+                return header.id, category
+        except Exception:
+            pass
+        return None, None
+
+    def show_upload_app_dialog(self, preselected_path=None):
+        """Dialog to upload a package (.TCA/.TCD/.TCEPACKAGE). The offered
+        category set follows the file type: .tca -> application/game, .tcd ->
+        other component kinds, .tcepackage -> TCE package. If preselected_path is
+        given the file picker step is skipped and that path is used directly."""
+        if preselected_path:
+            file_path = preselected_path
+        else:
+            dlg = wx.FileDialog(
+                self,
+                _("Select package file (.TCA/.TCD)"),
+                wildcard="Titan Packages (*.tca;*.tcd)|*.tca;*.tcd|"
+                         "TCE Packages (*.TCEPACKAGE)|*.TCEPACKAGE|"
+                         "All files (*.*)|*.*",
+                style=wx.FD_OPEN | wx.FD_FILE_MUST_EXIST
+            )
+            if dlg.ShowModal() != wx.ID_OK:
+                dlg.Destroy()
+                return
             file_path = dlg.GetPath()
+            dlg.Destroy()
 
-            # Ask for package name
-            name_dlg = _new_text_entry_dialog(self, _("Package name:"), _("Upload Package"))
-            if name_dlg.ShowModal() == wx.ID_OK:
-                app_name = name_dlg.GetValue().strip()
+        detected_id, detected_category = self._detect_package_kind(file_path)
 
-                # Ask for description
-                desc_dlg = _new_text_entry_dialog(self, _("Description:"), _("Upload Package"))
-                if desc_dlg.ShowModal() == wx.ID_OK:
-                    description = desc_dlg.GetValue().strip()
+        # Ask for package name (pre-filled from the manifest id when detected)
+        name_dlg = _new_text_entry_dialog(
+            self, _("Package name:"), _("Upload Package"),
+            detected_id or ""
+        )
+        if name_dlg.ShowModal() == wx.ID_OK:
+            app_name = name_dlg.GetValue().strip()
 
-                    # Ask for category
-                    categories = [
-                        ("Application", "application"),
-                        ("Component", "component"),
-                        ("Sound Theme", "sound_theme"),
-                        ("Game", "game"),
-                        ("TCE Package", "tce_package"),
-                        ("Language Pack", "language_pack"),
-                        ("Status Bar Applet", "status_bar_applet")
-                    ]
-                    category_labels = [cat[0] for cat in categories]
-                    cat_dlg = wx.SingleChoiceDialog(self, _("Select category:"), _("Category"), category_labels)
-                    if cat_dlg.ShowModal() == wx.ID_OK:
-                        category = categories[cat_dlg.GetSelection()][1]  # Use server-compatible value
+            # Ask for description
+            desc_dlg = _new_text_entry_dialog(self, _("Description:"), _("Upload Package"))
+            if desc_dlg.ShowModal() == wx.ID_OK:
+                description = desc_dlg.GetValue().strip()
 
-                        # Ask for version
-                        ver_dlg = _new_text_entry_dialog(self, _("Version (e.g. 1.0.0):"), _("Version"), "1.0.0")
-                        if ver_dlg.ShowModal() == wx.ID_OK:
-                            version = ver_dlg.GetValue().strip()
+                # Ask for category. The set offered depends on the file type so
+                # the .tca/.tcd distinction is enforced:
+                #   .tca  -> applications and games only
+                #   .tcd  -> every other add-on kind (components, launchers,
+                #            IM modules, gamepad modes, TTS engines, widgets,
+                #            status bar applets, sound themes, language packs)
+                #   .tcepackage / unknown -> the full list
+                # (pre-selected when the file was recognized as a known kind)
+                app_game_categories = [
+                    ("Application", "application"),
+                    ("Game", "game"),
+                ]
+                component_categories = [
+                    ("Component", "component"),
+                    ("Launcher", "launcher"),
+                    ("Titan IM Module", "im_module"),
+                    ("Gamepad Mode", "gamepad_mode"),
+                    ("TTS Engine", "tts_engine"),
+                    ("Widget/Applet", "widget"),
+                    ("Status Bar Applet", "status_bar_applet"),
+                    ("Sound Theme", "sound_theme"),
+                    ("Language Pack", "language_pack"),
+                ]
+                ext = os.path.splitext(file_path)[1].lower()
+                if ext == '.tca':
+                    categories = app_game_categories
+                elif ext == '.tcd':
+                    categories = component_categories
+                elif ext == '.tcepackage':
+                    categories = [("TCE Package", "tce_package")]
+                else:
+                    categories = (app_game_categories + component_categories +
+                                  [("TCE Package", "tce_package")])
+                category_labels = [cat[0] for cat in categories]
+                cat_dlg = wx.SingleChoiceDialog(self, _("Select category:"), _("Category"), category_labels)
+                if detected_category:
+                    values = [cat[1] for cat in categories]
+                    if detected_category in values:
+                        cat_dlg.SetSelection(values.index(detected_category))
+                if cat_dlg.ShowModal() == wx.ID_OK:
+                    category = categories[cat_dlg.GetSelection()][1]  # Use server-compatible value
 
-                            # Upload package with a GUI progress bar.
-                            speak_titannet(_("Uploading package..."))
-                            progress = wx.ProgressDialog(
-                                _("Uploading Package"),
-                                _("Starting upload..."),
-                                maximum=100,
-                                parent=self,
-                                style=wx.PD_APP_MODAL | wx.PD_AUTO_HIDE | wx.PD_SMOOTH
-                            )
-                            on_progress = self._make_transfer_progress(
-                                progress, _("Uploading: {percent}%"))
+                    # Ask for version
+                    ver_dlg = _new_text_entry_dialog(self, _("Version (e.g. 1.0.0):"), _("Version"), "1.0.0")
+                    if ver_dlg.ShowModal() == wx.ID_OK:
+                        version = ver_dlg.GetValue().strip()
 
-                            def upload_thread():
-                                try:
-                                    result = self.titan_client.upload_app(
-                                        file_path,
-                                        app_name,
-                                        version,
-                                        description,
-                                        category,
-                                        progress_callback=on_progress
-                                    )
-                                    wx.CallAfter(self._on_upload_done, result, progress)
-                                except Exception as e:
-                                    wx.CallAfter(self._on_upload_done,
-                                                 {"success": False, "error": str(e)}, progress)
+                        # Upload package with a GUI progress bar.
+                        speak_titannet(_("Uploading package..."))
+                        progress = wx.ProgressDialog(
+                            _("Uploading Package"),
+                            _("Starting upload..."),
+                            maximum=100,
+                            parent=self,
+                            style=wx.PD_APP_MODAL | wx.PD_AUTO_HIDE | wx.PD_SMOOTH
+                        )
+                        on_progress = self._make_transfer_progress(
+                            progress, _("Uploading: {percent}%"))
 
-                            threading.Thread(target=upload_thread, daemon=True).start()
+                        def upload_thread():
+                            try:
+                                result = self.titan_client.upload_app(
+                                    file_path,
+                                    app_name,
+                                    version,
+                                    description,
+                                    category,
+                                    progress_callback=on_progress
+                                )
+                                wx.CallAfter(self._on_upload_done, result, progress)
+                            except Exception as e:
+                                wx.CallAfter(self._on_upload_done,
+                                             {"success": False, "error": str(e)}, progress)
 
-                        ver_dlg.Destroy()
-                    cat_dlg.Destroy()
-                desc_dlg.Destroy()
-            name_dlg.Destroy()
+                        threading.Thread(target=upload_thread, daemon=True).start()
 
-        dlg.Destroy()
+                    ver_dlg.Destroy()
+                cat_dlg.Destroy()
+            desc_dlg.Destroy()
+        name_dlg.Destroy()
 
     def _make_transfer_progress(self, progress, announce_template):
         """Return a thread-safe progress callback for upload/download.

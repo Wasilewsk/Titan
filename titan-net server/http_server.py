@@ -21,6 +21,7 @@ import urllib.parse
 import tempfile
 from models import Database
 from config import Config
+import remote_ui
 
 # Create logs directory if it doesn't exist
 import os
@@ -170,6 +171,7 @@ class TitanNetHTTPServer:
         self.app.router.add_post('/api/groups', self.handle_create_group)
         self.app.router.add_get('/api/groups/{group_id}', self.handle_get_group)
         self.app.router.add_put('/api/groups/{group_id}', self.handle_update_group)
+        self.app.router.add_post('/api/groups/{group_id}/rename', self.handle_rename_group)
         self.app.router.add_delete('/api/groups/{group_id}', self.handle_delete_group)
         self.app.router.add_post('/api/groups/{group_id}/join', self.handle_join_group)
         self.app.router.add_post('/api/groups/{group_id}/leave', self.handle_leave_group)
@@ -195,6 +197,9 @@ class TitanNetHTTPServer:
         self.app.router.add_get('/api/extensions/{ext_id}', self.handle_get_extension)
         self.app.router.add_post('/api/extensions/{ext_id}/approve', self.handle_approve_extension)
         self.app.router.add_post('/api/extensions/{ext_id}/reject', self.handle_reject_extension)
+        self.app.router.add_post('/api/extensions/{ext_id}/disable', self.handle_disable_extension)
+        self.app.router.add_post('/api/extensions/{ext_id}/enable', self.handle_enable_extension)
+        self.app.router.add_delete('/api/extensions/{ext_id}', self.handle_delete_extension)
         self.app.router.add_get('/api/extensions/{slug}/client', self.handle_extension_client)
         self.app.router.add_get('/api/extensions/{slug}/data/{key}', self.handle_extension_data_get)
         self.app.router.add_put('/api/extensions/{slug}/data/{key}', self.handle_extension_data_set)
@@ -202,6 +207,23 @@ class TitanNetHTTPServer:
         self.app.router.add_post('/api/extensions/{ext_id}/assets', self.handle_add_extension_asset)
         self.app.router.add_get('/api/extensions/{slug}/assets', self.handle_list_extension_assets)
         self.app.router.add_get('/api/extensions/{slug}/asset/{kind}/{name}', self.handle_get_extension_asset)
+
+        # Remote UI: screens the server defines and clients render, so a new
+        # Titan-Net dialog never requires users to update their client.
+        self.app.router.add_get('/api/remote-screens', self.handle_list_remote_screens)
+        self.app.router.add_post('/api/remote-screens', self.handle_save_remote_screen)
+        self.app.router.add_get('/api/remote-screens/{slug}', self.handle_get_remote_screen)
+        self.app.router.add_delete('/api/remote-screens/{slug}', self.handle_delete_remote_screen)
+        self.app.router.add_get('/api/remote-screens/{slug}/submissions',
+                                self.handle_list_remote_submissions)
+
+        # Server sounds: upload once, play at one user / a role / everyone.
+        self.app.router.add_get('/api/sounds', self.handle_list_server_sounds)
+        self.app.router.add_post('/api/sounds', self.handle_upload_server_sound)
+        self.app.router.add_get('/api/sounds/{name}', self.handle_download_server_sound)
+        self.app.router.add_delete('/api/sounds/{name}', self.handle_delete_server_sound)
+        self.app.router.add_post('/api/sounds/{name}/play', self.handle_play_server_sound)
+        self.app.router.add_post('/api/remote-screens/{slug}/push', self.handle_push_remote_screen)
 
         # Curated moderation capability extensions build on (server-enforced).
         self.app.router.add_post('/api/moderation/jail', self.handle_jail_user)
@@ -404,7 +426,7 @@ class TitanNetHTTPServer:
         # 4 MB read chunks: large enough that per-chunk overhead is negligible
         # for a 1GB file, small enough to keep memory flat.
         CHUNK_SIZE = 4 * 1024 * 1024
-        ALLOWED_EXTENSIONS = ('.tcepackage', '.zip', '.7z')
+        ALLOWED_EXTENSIONS = ('.tcepackage', '.zip', '.7z', '.tca', '.tcd')
 
         temp_path = None
         try:
@@ -506,7 +528,12 @@ class TitanNetHTTPServer:
             # Validate category
             valid_categories = [
                 'application', 'component', 'sound_theme',
-                'game', 'tce_package', 'language_pack'
+                'game', 'tce_package', 'language_pack',
+                'status_bar_applet',  # already offered by the desktop upload
+                                       # dialog but was missing here -- fixed
+                                       # alongside the .tca/.tcd additions below
+                'launcher', 'im_module', 'gamepad_mode',
+                'tts_engine', 'widget',
             ]
             if metadata['category'] not in valid_categories:
                 return web.json_response({
@@ -1610,22 +1637,54 @@ class TitanNetHTTPServer:
             to_addr = (data.get('to') or '').strip()
             subject = (data.get('subject') or '').strip()
             body = data.get('body') or ''
+            # A rich message carries both parts: `body` is the readable
+            # plain-text version (what every client can show), `body_html` the
+            # formatted alternative. Clients that predate this send neither.
+            body_html = data.get('body_html') or ''
+            content_type = (data.get('content_type') or 'text/plain').strip()
             if not to_addr:
                 return web.json_response({'success': False, 'error': 'Recipient is required'}, status=400)
             loop = asyncio.get_event_loop()
+            # Mint the Message-ID here so the stored copy and the message that
+            # actually leaves the server share one identity - that is what lets
+            # a reply coming back from an external client be threaded onto it.
+            from email.utils import make_msgid
+            try:
+                from config import Config
+                msgid_domain = (Config.MAIL_DOMAIN or '').strip() or None
+            except Exception:
+                msgid_domain = None
+            message_id = make_msgid(domain=msgid_domain)
             result = await loop.run_in_executor(
-                None, self.db.send_user_mail, user['id'], to_addr, subject, body
+                None, self.db.send_user_mail, user['id'], to_addr, subject, body,
+                message_id, body_html, content_type
             )
             # If the recipient is remote, hand the message to the outbound mailer.
             if result.get('success') and result.get('external_recipient'):
                 try:
                     import mailer
                     from email.message import EmailMessage
+                    from email.utils import formatdate
                     msg = EmailMessage()
                     msg['Subject'] = subject
                     msg['From'] = result.get('from_addr')
                     msg['To'] = result['external_recipient']
+                    # Date and Message-ID are mandatory for a well-formed
+                    # message. Postfix does not add them (always_add_missing_
+                    # headers defaults to off), so without these the mail is
+                    # treated as spam by big providers and any reply to it
+                    # carries nothing to thread against.
+                    msg['Date'] = formatdate(localtime=True)
+                    msg['Message-ID'] = message_id
+                    if result.get('in_reply_to'):
+                        msg['In-Reply-To'] = result['in_reply_to']
+                        msg['References'] = result['in_reply_to']
                     msg.set_content(body)
+                    if body_html:
+                        # multipart/alternative: the recipient's mail program
+                        # picks the HTML, anything that refuses it (or reads it
+                        # aloud) still has the plain text above.
+                        msg.add_alternative(body_html, subtype='html')
                     await loop.run_in_executor(
                         None, mailer.send_message, msg, result.get('from_addr'),
                         [result['external_recipient']],
@@ -1651,15 +1710,25 @@ class TitanNetHTTPServer:
             sender = (data.get('sender') or '').strip()
             subject = (data.get('subject') or '').strip()
             body = data.get('body') or ''
+            # The delivery pipe now keeps the HTML part of a multipart message
+            # instead of flattening it away, so the Mail client can render the
+            # message the way its sender wrote it.
+            body_html = data.get('body_html') or ''
+            content_type = (data.get('content_type') or 'text/plain').strip()
+            message_id = (data.get('message_id') or '').strip()
+            in_reply_to = (data.get('in_reply_to') or '').strip()
             loop = asyncio.get_event_loop()
             local = await loop.run_in_executor(None, self.db.resolve_local_user_by_address, recipient)
             if not local:
                 # Unknown mailbox: accept and drop (avoids Postfix retry loops).
                 return web.json_response({'success': True, 'delivered': False})
             result = await loop.run_in_executor(
-                None, self.db.store_incoming_mail, local['id'], sender, recipient, subject, body
+                None, self.db.store_incoming_mail, local['id'], sender, recipient, subject, body,
+                None, message_id, in_reply_to, body_html, content_type
             )
-            return web.json_response({'success': True, 'delivered': True, 'mail_id': result.get('mail_id')})
+            return web.json_response({'success': True, 'delivered': True,
+                                      'mail_id': result.get('mail_id'),
+                                      'duplicate': bool(result.get('duplicate'))})
         except Exception as e:
             logger.error(f"Mail incoming error: {e}", exc_info=True)
             return web.json_response({'success': False, 'error': str(e)}, status=500)
@@ -1752,6 +1821,22 @@ class TitanNetHTTPServer:
             return web.json_response(result, status=200 if result.get('success') else 403)
         except Exception as e:
             logger.error(f"Update group error: {e}", exc_info=True)
+            return web.json_response({'success': False, 'error': str(e)}, status=500)
+
+    async def handle_rename_group(self, request: web.Request) -> web.Response:
+        try:
+            user = self._require_auth(request)
+            if not user:
+                return self._auth_required_response()
+            group_id = int(request.match_info['group_id'])
+            data = await request.json()
+            loop = asyncio.get_event_loop()
+            result = await loop.run_in_executor(
+                None, self.db.rename_group, group_id, data.get('name'), user['id']
+            )
+            return web.json_response(result, status=200 if result.get('success') else 403)
+        except Exception as e:
+            logger.error(f"Rename group error: {e}", exc_info=True)
             return web.json_response({'success': False, 'error': str(e)}, status=500)
 
     async def handle_delete_group(self, request: web.Request) -> web.Response:
@@ -2025,6 +2110,337 @@ class TitanNetHTTPServer:
             return True
         return await loop.run_in_executor(None, self.db.is_moderator, user['id'])
 
+    # =====================================================================
+    # Remote UI handlers (server-defined screens)
+    # =====================================================================
+
+    async def handle_list_remote_screens(self, request: web.Request) -> web.Response:
+        """Screens the caller may open. Staff can ask for inactive ones too."""
+        try:
+            user = self._require_auth(request)
+            if not user:
+                return self._auth_required_response()
+            loop = asyncio.get_event_loop()
+            include_inactive = (request.query.get('all') == '1'
+                                and await self._is_staff(user, loop))
+            screens = await loop.run_in_executor(
+                None, self.db.list_remote_screens, user['id'], include_inactive)
+            return web.json_response({'success': True, 'screens': screens,
+                                      'schema': remote_ui.SCHEMA_VERSION})
+        except Exception as e:
+            logger.error(f"List remote screens error: {e}", exc_info=True)
+            return web.json_response({'success': False, 'error': str(e)}, status=500)
+
+    async def handle_get_remote_screen(self, request: web.Request) -> web.Response:
+        try:
+            user = self._require_auth(request)
+            if not user:
+                return self._auth_required_response()
+            slug = request.match_info['slug']
+            loop = asyncio.get_event_loop()
+            row = await loop.run_in_executor(None, self.db.get_remote_screen, slug)
+            if not row:
+                return web.json_response({'success': False, 'error': 'Screen not found'}, status=404)
+            visible = await loop.run_in_executor(
+                None, self.db.can_view_remote_screen, slug, user['id'])
+            if not visible and not await self._is_staff(user, loop):
+                return web.json_response({'success': False, 'error': 'Permission denied'}, status=403)
+            return web.json_response({'success': True, 'screen': row})
+        except Exception as e:
+            logger.error(f"Get remote screen error: {e}", exc_info=True)
+            return web.json_response({'success': False, 'error': str(e)}, status=500)
+
+    async def handle_save_remote_screen(self, request: web.Request) -> web.Response:
+        """Create or replace a screen. Staff only - this is server content."""
+        try:
+            user = self._require_auth(request)
+            if not user:
+                return self._auth_required_response()
+            loop = asyncio.get_event_loop()
+            if not await self._is_staff(user, loop):
+                return web.json_response({'success': False, 'error': 'Permission denied'}, status=403)
+
+            data = await request.json()
+            definition = data.get('definition')
+            # Validate BEFORE storing: a broken screen would otherwise fail on
+            # every client, one confused user at a time.
+            ok, why, normalised = remote_ui.validate_definition(definition)
+            if not ok:
+                return web.json_response({'success': False, 'error': why}, status=400)
+
+            handler_name = str(data.get('handler') or 'store')
+            if handler_name not in remote_ui.HANDLERS:
+                return web.json_response(
+                    {'success': False,
+                     'error': f"No server handler named '{handler_name}'"}, status=400)
+
+            result = await self.db.run_write_async(
+                self.db.save_remote_screen,
+                data.get('slug'), normalised['title'],
+                json.dumps(normalised, ensure_ascii=False), user['id'],
+                handler_name, data.get('audience', 'everyone'),
+                bool(data.get('in_menu', True)), bool(data.get('active', True)))
+            return web.json_response(result, status=200 if result.get('success') else 400)
+        except Exception as e:
+            logger.error(f"Save remote screen error: {e}", exc_info=True)
+            return web.json_response({'success': False, 'error': str(e)}, status=500)
+
+    async def handle_delete_remote_screen(self, request: web.Request) -> web.Response:
+        try:
+            user = self._require_auth(request)
+            if not user:
+                return self._auth_required_response()
+            loop = asyncio.get_event_loop()
+            if not await self._is_staff(user, loop):
+                return web.json_response({'success': False, 'error': 'Permission denied'}, status=403)
+            slug = request.match_info['slug']
+            result = await self.db.run_write_async(self.db.delete_remote_screen, slug)
+            return web.json_response(result, status=200 if result.get('success') else 404)
+        except Exception as e:
+            logger.error(f"Delete remote screen error: {e}", exc_info=True)
+            return web.json_response({'success': False, 'error': str(e)}, status=500)
+
+    async def handle_list_remote_submissions(self, request: web.Request) -> web.Response:
+        """What users sent back from a screen handled by the built-in 'store'."""
+        try:
+            user = self._require_auth(request)
+            if not user:
+                return self._auth_required_response()
+            loop = asyncio.get_event_loop()
+            if not await self._is_staff(user, loop):
+                return web.json_response({'success': False, 'error': 'Permission denied'}, status=403)
+            slug = request.match_info['slug']
+            try:
+                limit = max(1, min(1000, int(request.query.get('limit', 200))))
+            except Exception:
+                limit = 200
+            rows = await loop.run_in_executor(
+                None, self.db.list_remote_submissions, slug, limit)
+            for row in rows:
+                try:
+                    row['payload'] = json.loads(row['payload'])
+                except Exception:
+                    pass
+            return web.json_response({'success': True, 'submissions': rows})
+        except Exception as e:
+            logger.error(f"List remote submissions error: {e}", exc_info=True)
+            return web.json_response({'success': False, 'error': str(e)}, status=500)
+
+    # =====================================================================
+    # Server sound handlers
+    # =====================================================================
+
+    def _server_sound_path(self, filename: str) -> str:
+        return os.path.join(self.db.SERVER_SOUND_DIR, filename)
+
+    async def handle_list_server_sounds(self, request: web.Request) -> web.Response:
+        try:
+            user = self._require_auth(request)
+            if not user:
+                return self._auth_required_response()
+            loop = asyncio.get_event_loop()
+            sounds = await loop.run_in_executor(None, self.db.list_server_sounds)
+            return web.json_response({'success': True, 'sounds': sounds})
+        except Exception as e:
+            logger.error(f"List server sounds error: {e}", exc_info=True)
+            return web.json_response({'success': False, 'error': str(e)}, status=500)
+
+    async def handle_upload_server_sound(self, request: web.Request) -> web.Response:
+        """Staff uploads a sound the server can later play at anyone.
+
+        Accepts JSON ``{name, content (base64), filename, description}``.
+        """
+        try:
+            user = self._require_auth(request)
+            if not user:
+                return self._auth_required_response()
+            loop = asyncio.get_event_loop()
+            if not await self._is_staff(user, loop):
+                return web.json_response({'success': False, 'error': 'Permission denied'}, status=403)
+
+            data = await request.json()
+            name = str(data.get('name') or '').strip().lower()
+            source_name = str(data.get('filename') or name)
+            ext = os.path.splitext(source_name)[1].lower()
+            if ext not in self.db.SERVER_SOUND_EXTENSIONS:
+                return web.json_response(
+                    {'success': False,
+                     'error': f"Unsupported audio format '{ext or '(none)'}'. "
+                              f"Allowed: {', '.join(self.db.SERVER_SOUND_EXTENSIONS)}"},
+                    status=400)
+            try:
+                payload = base64.b64decode(data.get('content') or '')
+            except Exception:
+                return web.json_response({'success': False, 'error': 'Invalid base64 content'}, status=400)
+            if not payload:
+                return web.json_response({'success': False, 'error': 'Empty file'}, status=400)
+            if len(payload) > self.db.SERVER_SOUND_MAX_BYTES:
+                limit_mb = self.db.SERVER_SOUND_MAX_BYTES // (1024 * 1024)
+                return web.json_response(
+                    {'success': False, 'error': f'Sound is larger than {limit_mb} MB'}, status=400)
+
+            digest = hashlib.sha256(payload).hexdigest()
+            # Content-addressed on disk: re-uploading the same audio under a
+            # new name costs nothing, and clients cache by the same hash.
+            stored_name = f"{digest}{ext}"
+
+            def _write():
+                os.makedirs(self.db.SERVER_SOUND_DIR, exist_ok=True)
+                path = self._server_sound_path(stored_name)
+                if not os.path.exists(path):
+                    with open(path, 'wb') as fh:
+                        fh.write(payload)
+                return path
+
+            await loop.run_in_executor(None, _write)
+
+            result = await self.db.run_write_async(
+                self.db.add_server_sound, name, stored_name, digest, len(payload),
+                user['id'], data.get('mime'), data.get('description'))
+            if result.get('success'):
+                logger.info(f"[SOUNDS] {user['username']} uploaded '{name}' "
+                            f"({len(payload)} bytes)")
+                await self._prune_orphan_sound(result.get('replaced'), stored_name)
+            return web.json_response(result, status=200 if result.get('success') else 400)
+        except Exception as e:
+            logger.error(f"Upload server sound error: {e}", exc_info=True)
+            return web.json_response({'success': False, 'error': str(e)}, status=500)
+
+    async def _prune_orphan_sound(self, filename: Optional[str],
+                                  keep: Optional[str] = None):
+        """Delete a stored audio file once no sound row references it."""
+        if not filename or filename == keep:
+            return
+        loop = asyncio.get_event_loop()
+
+        def _prune():
+            try:
+                conn = self.db.get_connection()
+                cursor = conn.cursor()
+                cursor.execute("SELECT COUNT(*) AS n FROM server_sounds WHERE filename = ?",
+                               (filename,))
+                still_used = cursor.fetchone()['n']
+                conn.close()
+                if still_used:
+                    return
+                path = self._server_sound_path(filename)
+                if os.path.isfile(path):
+                    os.remove(path)
+            except Exception as e:
+                logger.warning(f"[SOUNDS] could not prune {filename}: {e}")
+
+        await loop.run_in_executor(None, _prune)
+
+    async def handle_download_server_sound(self, request: web.Request) -> web.Response:
+        """Fetch a sound's bytes. Clients call this once, then cache by hash."""
+        try:
+            user = self._require_auth(request)
+            if not user:
+                return self._auth_required_response()
+            name = request.match_info['name']
+            loop = asyncio.get_event_loop()
+            sound = await loop.run_in_executor(None, self.db.get_server_sound, name)
+            if not sound:
+                return web.json_response({'success': False, 'error': 'Sound not found'}, status=404)
+
+            # Defence in depth: only ever serve out of the sounds directory.
+            abs_root = os.path.abspath(self.db.SERVER_SOUND_DIR)
+            abs_path = os.path.abspath(self._server_sound_path(sound['filename']))
+            if not abs_path.startswith(abs_root + os.sep):
+                return web.json_response({'success': False, 'error': 'Invalid path'}, status=400)
+            if not os.path.isfile(abs_path):
+                return web.json_response({'success': False, 'error': 'Audio file missing'}, status=404)
+
+            def _read():
+                with open(abs_path, 'rb') as fh:
+                    return fh.read()
+
+            payload = await loop.run_in_executor(None, _read)
+            return web.json_response({
+                'success': True,
+                'name': sound['name'],
+                'sha256': sound['sha256'],
+                'mime': sound.get('mime'),
+                'filename': sound['filename'],
+                'content': base64.b64encode(payload).decode(),
+            })
+        except Exception as e:
+            logger.error(f"Download server sound error: {e}", exc_info=True)
+            return web.json_response({'success': False, 'error': str(e)}, status=500)
+
+    async def handle_delete_server_sound(self, request: web.Request) -> web.Response:
+        try:
+            user = self._require_auth(request)
+            if not user:
+                return self._auth_required_response()
+            loop = asyncio.get_event_loop()
+            if not await self._is_staff(user, loop):
+                return web.json_response({'success': False, 'error': 'Permission denied'}, status=403)
+            name = request.match_info['name']
+            result = await self.db.run_write_async(self.db.delete_server_sound, name)
+            if result.get('success'):
+                await self._prune_orphan_sound(result.get('filename'))
+            return web.json_response(result, status=200 if result.get('success') else 404)
+        except Exception as e:
+            logger.error(f"Delete server sound error: {e}", exc_info=True)
+            return web.json_response({'success': False, 'error': str(e)}, status=500)
+
+    async def handle_play_server_sound(self, request: web.Request) -> web.Response:
+        """Play a registered sound at whoever the target selects.
+
+        The HTTP twin of the WebSocket ``play_server_sound`` message, so a
+        server-side component or a cron job can make noise without holding a
+        chat session open.
+        """
+        try:
+            user = self._require_auth(request)
+            if not user:
+                return self._auth_required_response()
+            loop = asyncio.get_event_loop()
+            if not await self._is_staff(user, loop):
+                return web.json_response({'success': False, 'error': 'Permission denied'}, status=403)
+            ws_server = getattr(self, 'ws_server', None)
+            if ws_server is None:
+                return web.json_response(
+                    {'success': False, 'error': 'Live server unavailable'}, status=503)
+
+            name = request.match_info['name']
+            data = await request.json() if request.can_read_body else {}
+            target = data.get('target') if isinstance(data.get('target'), dict) else {'type': 'all'}
+            try:
+                volume = float(data.get('volume', 1.0))
+            except Exception:
+                volume = 1.0
+            sent = await ws_server.push_server_sound(
+                name, target, volume, bool(data.get('loop')), data.get('announce'))
+            return web.json_response({'success': bool(sent), 'played_to': sent})
+        except Exception as e:
+            logger.error(f"Play server sound error: {e}", exc_info=True)
+            return web.json_response({'success': False, 'error': str(e)}, status=500)
+
+    async def handle_push_remote_screen(self, request: web.Request) -> web.Response:
+        """Open one of the server's screens on somebody's client right now."""
+        try:
+            user = self._require_auth(request)
+            if not user:
+                return self._auth_required_response()
+            loop = asyncio.get_event_loop()
+            if not await self._is_staff(user, loop):
+                return web.json_response({'success': False, 'error': 'Permission denied'}, status=403)
+            ws_server = getattr(self, 'ws_server', None)
+            if ws_server is None:
+                return web.json_response(
+                    {'success': False, 'error': 'Live server unavailable'}, status=503)
+
+            slug = request.match_info['slug']
+            data = await request.json() if request.can_read_body else {}
+            target = data.get('target') if isinstance(data.get('target'), dict) else {'type': 'all'}
+            sent = await ws_server.push_remote_screen(target, slug)
+            return web.json_response({'success': bool(sent), 'pushed_to': sent})
+        except Exception as e:
+            logger.error(f"Push remote screen error: {e}", exc_info=True)
+            return web.json_response({'success': False, 'error': str(e)}, status=500)
+
     async def handle_submit_extension(self, request: web.Request) -> web.Response:
         try:
             user = self._require_auth(request)
@@ -2127,6 +2543,60 @@ class TitanNetHTTPServer:
             return web.json_response(result, status=200 if result.get('success') else 403)
         except Exception as e:
             logger.error(f"Reject extension error: {e}", exc_info=True)
+            return web.json_response({'success': False, 'error': str(e)}, status=500)
+
+    async def handle_disable_extension(self, request: web.Request) -> web.Response:
+        """Take an ACTIVE moderator component offline network-wide (staff only)."""
+        try:
+            user = self._require_auth(request)
+            if not user:
+                return self._auth_required_response()
+            ext_id = int(request.match_info['ext_id'])
+            loop = asyncio.get_event_loop()
+            result = await loop.run_in_executor(
+                None, self.db.set_extension_active, ext_id, user['id'], False
+            )
+            if result.get('success'):
+                logger.info(f"Extension {ext_id} disabled by {user['username']}")
+            return web.json_response(result, status=200 if result.get('success') else 403)
+        except Exception as e:
+            logger.error(f"Disable extension error: {e}", exc_info=True)
+            return web.json_response({'success': False, 'error': str(e)}, status=500)
+
+    async def handle_enable_extension(self, request: web.Request) -> web.Response:
+        """Restore a disabled moderator component to active (staff only)."""
+        try:
+            user = self._require_auth(request)
+            if not user:
+                return self._auth_required_response()
+            ext_id = int(request.match_info['ext_id'])
+            loop = asyncio.get_event_loop()
+            result = await loop.run_in_executor(
+                None, self.db.set_extension_active, ext_id, user['id'], True
+            )
+            if result.get('success'):
+                logger.info(f"Extension {ext_id} enabled by {user['username']}")
+            return web.json_response(result, status=200 if result.get('success') else 403)
+        except Exception as e:
+            logger.error(f"Enable extension error: {e}", exc_info=True)
+            return web.json_response({'success': False, 'error': str(e)}, status=500)
+
+    async def handle_delete_extension(self, request: web.Request) -> web.Response:
+        """Permanently delete a moderator component (staff only)."""
+        try:
+            user = self._require_auth(request)
+            if not user:
+                return self._auth_required_response()
+            ext_id = int(request.match_info['ext_id'])
+            loop = asyncio.get_event_loop()
+            result = await loop.run_in_executor(
+                None, self.db.delete_extension, ext_id, user['id']
+            )
+            if result.get('success'):
+                logger.info(f"Extension {ext_id} deleted by {user['username']}")
+            return web.json_response(result, status=200 if result.get('success') else 403)
+        except Exception as e:
+            logger.error(f"Delete extension error: {e}", exc_info=True)
             return web.json_response({'success': False, 'error': str(e)}, status=500)
 
     async def handle_extension_client(self, request: web.Request) -> web.Response:
@@ -2934,6 +3404,93 @@ class TitanNetHTTPServer:
             logger.error(f"Edit reply error: {e}", exc_info=True)
             return web.json_response({'success': False, 'error': str(e)}, status=500)
 
+    async def _notify_topic_move(self, actor: dict, result: dict) -> None:
+        """Tell the people affected by a move. Best-effort, never fails the move.
+
+        * moved  - the thread author hears where their thread went (unless they
+          moved it themselves).
+        * pending - every moderator of the TARGET group hears that a request is
+          waiting. Nothing informed them before, so a cross-group move looked
+          like it silently did nothing.
+
+        Both use a private message so the notice survives being offline, plus a
+        live WS push for anyone currently connected.
+        """
+        loop = asyncio.get_event_loop()
+        status = result.get('status')
+        title = result.get('title') or 'a thread'
+        to_forum = result.get('to_forum_name') or 'another forum'
+        from_forum = result.get('from_forum_name') or 'another forum'
+        actor_id = actor['id']
+        actor_name = actor.get('username') or 'A moderator'
+
+        async def _pm(recipient_id: int, text: str) -> None:
+            if not recipient_id or int(recipient_id) == int(actor_id):
+                return
+            try:
+                await loop.run_in_executor(
+                    None, self.db.send_private_message, actor_id, int(recipient_id), text
+                )
+            except Exception as e:
+                logger.warning(f"Topic-move notify failed for {recipient_id}: {e}")
+
+        async def _push(recipient_id: int, payload: dict) -> None:
+            if not recipient_id or int(recipient_id) == int(actor_id):
+                return
+            try:
+                ws_server = getattr(self, 'ws_server', None)
+                send = getattr(ws_server, 'send_to_user', None) if ws_server else None
+                if not send:
+                    return
+                sent = send(int(recipient_id), payload)
+                if asyncio.iscoroutine(sent):
+                    await sent
+            except Exception as e:
+                logger.warning(f"Topic-move WS push failed for {recipient_id}: {e}")
+
+        if status == 'moved':
+            text = (f"Your thread '{title}' was moved from forum '{from_forum}' "
+                    f"to forum '{to_forum}' by {actor_name}.")
+            await _pm(result.get('author_id'), text)
+            await _push(result.get('author_id'), {
+                'type': 'forum_topic_moved',
+                'topic_id': result.get('topic_id'),
+                'title': title,
+                'from_forum': from_forum,
+                'to_forum': to_forum,
+                'moved_by': actor_name,
+            })
+            return
+
+        if status != 'pending':
+            return
+
+        target_group = result.get('to_group_id')
+        if not target_group:
+            return
+        try:
+            moderator_ids = await loop.run_in_executor(
+                None, self.db.list_group_moderator_ids, int(target_group)
+            )
+        except Exception as e:
+            logger.warning(f"Could not list moderators of group {target_group}: {e}")
+            return
+
+        text = (f"{actor_name} asks to move the thread '{title}' from forum "
+                f"'{from_forum}' into your forum '{to_forum}'. Approve or reject "
+                f"it in the move requests list.")
+        for moderator_id in moderator_ids:
+            await _pm(moderator_id, text)
+            await _push(moderator_id, {
+                'type': 'forum_move_request',
+                'request_id': result.get('request_id'),
+                'topic_id': result.get('topic_id'),
+                'title': title,
+                'from_forum': from_forum,
+                'to_forum': to_forum,
+                'requested_by': actor_name,
+            })
+
     async def handle_move_topic(self, request: web.Request) -> web.Response:
         """Move forum topic to different category (moderator only)"""
         try:
@@ -2959,6 +3516,7 @@ class TitanNetHTTPServer:
                 )
                 if result.get('success'):
                     logger.info(f"Topic {topic_id} move ({result.get('status')}) by {user['username']}")
+                    await self._notify_topic_move(user, result)
                 return web.json_response(result, status=200 if result.get('success') else 403)
 
             # Legacy path: move within the flat forum by category text.

@@ -654,12 +654,18 @@ _bundled_exe_name = 'espeak-ng.exe' if IS_WINDOWS else 'espeak-ng'
 bundled_espeak_exe = os.path.join(bundled_espeak_dir, _bundled_exe_name)
 bundled_espeak_data = os.path.join(bundled_espeak_dir, 'espeak-ng-data')
 
-if os.path.exists(bundled_espeak_exe):
+# The executable is only ever a fallback for the DLL, and probing it costs a
+# process launch on every start. On a machine where the DLL loaded, that probe
+# is pure delay - and the bundled espeak-ng.exe waits on its own voice-list
+# enumeration long enough to blow the timeout, which is why every startup
+# printed "Bundled eSpeak test failed ... timed out after 2 seconds" for a
+# capability Titan was not going to use anyway.
+if not ESPEAK_DLL_AVAILABLE and os.path.exists(bundled_espeak_exe):
     try:
         # Test bundled eSpeak
         result = subprocess.run([bundled_espeak_exe, '--version'],
                               capture_output=True,
-                              timeout=2,
+                              timeout=8,
                               creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
         if result.returncode == 0:
             ESPEAK_AVAILABLE = True
@@ -667,23 +673,23 @@ if os.path.exists(bundled_espeak_exe):
             if os.path.exists(bundled_espeak_data):
                 ESPEAK_DATA_PATH = bundled_espeak_data
             print(f"[StereoSpeech] Found bundled eSpeak exe: {bundled_espeak_exe}")
-    except (FileNotFoundError, subprocess.TimeoutExpired, Exception) as e:
+    except Exception as e:
         print(f"[StereoSpeech] Bundled eSpeak test failed: {e}")
 
 # If bundled eSpeak not found, try system eSpeak
-if not ESPEAK_AVAILABLE:
+if not ESPEAK_AVAILABLE and not ESPEAK_DLL_AVAILABLE:
     for espeak_cmd in ['espeak-ng', 'espeak']:
         try:
             result = subprocess.run([espeak_cmd, '--version'],
                                   capture_output=True,
-                                  timeout=2,
+                                  timeout=8,
                                   creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
             if result.returncode == 0:
                 ESPEAK_AVAILABLE = True
                 ESPEAK_PATH = espeak_cmd
                 print(f"[StereoSpeech] Found system eSpeak: {espeak_cmd}")
                 break
-        except (FileNotFoundError, subprocess.TimeoutExpired, Exception):
+        except Exception:
             continue
 
 # Platform-specific native TTS detection
@@ -846,6 +852,31 @@ def trim_silence(sound, silence_threshold=-50.0, chunk_size=10,
     except Exception as e:
         print(f"Warning: Error during silence trimming: {e}")
         return sound
+
+
+def _sapi_error_text(exc):
+    """Turn a COM failure into something a log reader can act on.
+
+    pywin32 reports a failed SAPI call as ``DISP_E_EXCEPTION`` with the real
+    reason buried in the nested EXCEPINFO tuple, so the raw repr says nothing
+    beyond "an exception occurred" - in whatever language Windows is in.
+    """
+    try:
+        args = getattr(exc, 'args', None) or ()
+        if len(args) >= 3 and isinstance(args[2], (tuple, list)) and args[2]:
+            info = args[2]
+            description = info[2] if len(info) > 2 and info[2] else ''
+            code = info[5] if len(info) > 5 and isinstance(info[5], int) else None
+            if code is not None:
+                detail = f"0x{code & 0xFFFFFFFF:08X}"
+                return f"{description} ({detail})" if description else detail
+            if description:
+                return str(description)
+        if args and isinstance(args[0], int):
+            return f"0x{args[0] & 0xFFFFFFFF:08X}"
+    except Exception:
+        pass
+    return str(exc)
 
 
 class _SAPIWorker:
@@ -1282,38 +1313,66 @@ Loop
         elif cmd_type == 'stop':
             self._sapi.Speak("", 3)  # SVSFlagsAsync | SVSFPurgeBeforeSpeak
         elif cmd_type == 'set_voice':
+            # Asking for the voice that is already loaded is a no-op. Startup
+            # syncs the saved voice to this worker more than once (settings
+            # load, then engine switch), and re-running the whole COM dance
+            # for it is what produced a bare DISP_E_EXCEPTION in the console.
+            if cmd[1] == self._voice_id:
+                return
+
+            prev_voice = None
+            prev_id = self._voice_id
+            direct_ok = False
+            direct_error = None
             try:
                 token = win32com.client.Dispatch("SAPI.SpObjectToken")
                 token.SetId(cmd[1])
                 # Save previous voice in case the new one is incompatible
                 prev_voice = self._sapi.Voice
-                prev_id = self._voice_id
                 self._sapi.Voice = token
                 # Validate: test-speak to memory stream
-                if self._test_voice():
-                    self._voice_id = cmd[1]
-                else:
-                    # Voice engine incompatible (e.g. x86 voice on x64 Python)
-                    # Try subprocess bridge for this voice
-                    print(f"[SAPIWorker] Voice incompatible via direct COM, trying subprocess bridge...")
-                    self._sapi.Voice = prev_voice
-                    self._voice_id = prev_id
-                    if not self._use_subprocess:
-                        if self._setup_subprocess_bridge():
-                            # Set the voice in the bridge subprocess
-                            self._voice_id = cmd[1]
-                            self._bridge_send(f"VOICE\t{cmd[1]}")
-                            resp = self._bridge_read_response(timeout=5.0)
-                            if resp != 'VOICE_OK':
-                                print(f"[SAPIWorker] Bridge voice set response: {resp}")
-                            self._switch_to_subprocess()
-                            return
-                        else:
-                            print(f"[SAPIWorker] set_voice failed: no bridge available, keeping previous voice")
-                    else:
-                        self._voice_id = cmd[1]
+                direct_ok = bool(self._test_voice())
             except Exception as e:
-                print(f"[SAPIWorker] set_voice error: {e}")
+                # A voice whose engine refuses to load in this process throws
+                # here rather than failing the test speak. Both mean the same
+                # thing - it cannot be driven directly - so both take the
+                # bridge, instead of leaving the worker on the old voice with
+                # only a COM error code to show for it.
+                direct_error = _sapi_error_text(e)
+
+            if direct_ok:
+                self._voice_id = cmd[1]
+                return
+
+            if direct_error:
+                print(f"[SAPIWorker] Voice rejected by direct COM ({direct_error}), "
+                      f"trying subprocess bridge...")
+            else:
+                # Voice engine incompatible (e.g. x86 voice on x64 Python)
+                print("[SAPIWorker] Voice incompatible via direct COM, "
+                      "trying subprocess bridge...")
+
+            try:
+                if prev_voice is not None:
+                    self._sapi.Voice = prev_voice
+            except Exception:
+                pass
+            self._voice_id = prev_id
+
+            if not self._use_subprocess:
+                if self._setup_subprocess_bridge():
+                    # Set the voice in the bridge subprocess
+                    self._voice_id = cmd[1]
+                    self._bridge_send(f"VOICE\t{cmd[1]}")
+                    resp = self._bridge_read_response(timeout=5.0)
+                    if resp != 'VOICE_OK':
+                        print(f"[SAPIWorker] Bridge voice set response: {resp}")
+                    self._switch_to_subprocess()
+                    return
+                print("[SAPIWorker] set_voice failed: no bridge available, "
+                      "keeping previous voice")
+            else:
+                self._voice_id = cmd[1]
         elif cmd_type == 'set_rate':
             self._sapi.Rate = cmd[1]
             self._rate = cmd[1]
@@ -1703,11 +1762,20 @@ class StereoSpeech:
                 self.set_engine(engine)
 
             # 2. Engine-specific configs (API keys, model, etc.)
+            # An API key is written to the settings file encrypted, so it has
+            # to be decrypted on the way back to the engine - the engine wants
+            # the real key, the file must never hold it.
+            try:
+                from src.titan_core.secret_store import load_value
+            except Exception:
+                def load_value(stored):
+                    return stored
             for key, value in stereo_settings.items():
                 if key.startswith('engine.'):
                     parts = key.split('.', 2)
                     if len(parts) == 3:
-                        self.set_engine_config(parts[1], parts[2], value)
+                        self.set_engine_config(parts[1], parts[2],
+                                               load_value(value))
 
             # 3. Rate (-10 to +10)
             try:
@@ -2363,7 +2431,11 @@ class StereoSpeech:
             if _seq is not None and _seq != self._speak_seq:
                 return
 
-            self.stop()
+            # invalidate_pending=False: this call already holds a still-valid
+            # _seq (just checked above); a bare stop() here only needs to clear
+            # out whatever previous utterance is still on the channel, not
+            # invalidate this in-progress, still-current one.
+            self.stop(invalidate_pending=False)
             self.is_speaking = True
 
             # In 3D mode we must always generate audio to memory so it can be
@@ -2449,7 +2521,9 @@ class StereoSpeech:
                     if _seq is not None and _seq != self._speak_seq:
                         return
 
-                    self.stop()  # Stop any playback that started while unlocked
+                    # invalidate_pending=False: see the comment on the sibling
+                    # self.stop() call above -- this _seq is still valid.
+                    self.stop(invalidate_pending=False)  # Stop any playback that started while unlocked
                     self.is_speaking = True
 
                     if not audio:
@@ -2517,7 +2591,8 @@ class StereoSpeech:
                                 pass
                         return
 
-                    self.stop()
+                    # invalidate_pending=False: _seq just re-checked as valid.
+                    self.stop(invalidate_pending=False)
                     self.is_speaking = True
 
                     if not temp_file:
@@ -2570,7 +2645,8 @@ class StereoSpeech:
                             if _seq is not None and _seq != self._speak_seq:
                                 return
 
-                            self.stop()
+                            # invalidate_pending=False: _seq just re-checked as valid.
+                            self.stop(invalidate_pending=False)
                             self.is_speaking = True
 
                         if not audio:
@@ -2791,7 +2867,10 @@ class StereoSpeech:
         # Signal current speech to stop immediately (without waiting for the lock):
         # sets is_speaking=False, kills EXE subprocess, cancels DLL, stops pygame channel.
         # This unblocks any thread stuck in communicate() or espeak_Synchronize().
-        self.stop()
+        # invalidate_pending=False: my_seq was JUST bumped-and-captured above --
+        # bumping again here would immediately supersede this very call before
+        # speak_thread below ever runs.
+        self.stop(invalidate_pending=False)
 
         def speak_thread():
             # If a newer message arrived while we were waiting, skip this one
@@ -2803,9 +2882,31 @@ class StereoSpeech:
         thread.daemon = True
         thread.start()
     
-    def stop(self):
-        """Stops current TTS speech safely."""
+    def stop(self, invalidate_pending=True):
+        """Stops current TTS speech safely.
+
+        ``invalidate_pending`` (default True) also bumps ``_speak_seq`` so any
+        in-flight ``speak``/``speak_async``/``speak_concat`` worker thread's own
+        freshness check (``if my_seq != self._speak_seq``) trips at its next
+        checkpoint and it stops producing MORE audio, instead of this call only
+        killing the channel that's playing RIGHT NOW. Without this, an external
+        "stop everything" call (e.g. the keyboard-hook's Ctrl-to-silence in
+        Titan Access, via SpeechAdapter.stop()) could halt the current segment
+        yet a still-running speak_concat worker -- past its own freshness check
+        already -- kept right on synthesizing and queuing/playing the NEXT
+        segments of the very announcement that was just interrupted.
+
+        Pass ``invalidate_pending=False`` from *within* this same synth/
+        playback pipeline, where the caller already captured its OWN valid
+        sequence number and is calling this only to clear out the PREVIOUS
+        utterance before proceeding -- bumping here would immediately
+        self-invalidate that in-progress, still-current call.
+        """
         try:
+            if invalidate_pending:
+                with self._seq_lock:
+                    self._speak_seq += 1
+
             self.is_speaking = False
 
             # Stop eSpeak DLL (always cancel - synthesis may be in progress even if not "playing")
@@ -2818,8 +2919,16 @@ class StereoSpeech:
             # Stop current TTS pygame channel
             if hasattr(self, 'current_tts_channel') and self.current_tts_channel:
                 try:
-                    if self.current_tts_channel.get_busy():
-                        self.current_tts_channel.stop()
+                    ch = self.current_tts_channel
+                    ch.stop()
+                    # Halting a channel with a segment queued via Channel.queue()
+                    # (see speak_concat's pipeline) makes SDL_mixer auto-advance
+                    # to it -- its "channel finished" callback can't tell a
+                    # manual stop from natural completion, so the FIRST stop()
+                    # above can actually start the queued segment playing. Stop
+                    # again to also kill that auto-started segment before it
+                    # becomes audible (harmless no-op if nothing is playing).
+                    ch.stop()
                 except (AttributeError, Exception) as e:
                     print(f"[StereoSpeech] Error stopping TTS channel: {e}")
                 finally:
@@ -2872,6 +2981,90 @@ class StereoSpeech:
         except Exception as e:
             print(f"[StereoSpeech] Error stopping speech: {e}")
 
+    def _synthesize_segment(self, text, pitch_offset=0):
+        """Render ONE utterance to an ``AudioSegment`` with the ACTIVE engine.
+
+        This is the engine-agnostic half of :meth:`speak_concat`: whatever the
+        current engine is (SAPI5, eSpeak, macOS ``say``, or any TitanTTS plugin
+        engine -- Supertonic, SMP, Eloquence, DECtalk, BestSpeech, ElevenLabs,
+        Milena, ...), it comes back as audio the caller can trim, pan, join and
+        play itself. It is the same per-engine dispatch :meth:`speak` performs,
+        factored out so a multi-part announcement no longer needs a per-engine
+        code path -- which is exactly why everything except SAPI used to lose
+        every part after the first.
+
+        Returns ``None`` when this engine cannot synthesize to memory (spd-say,
+        or no pydub), which is the caller's signal to fall back.
+        """
+        if not text or not PYDUB_AVAILABLE:
+            return None
+        engine = getattr(self, 'engine', '')
+        try:
+            if engine == 'sapi5' and getattr(self, '_sapi_worker', None):
+                tmp = tempfile.NamedTemporaryFile(suffix='.wav', delete=False)
+                tmp_path = os.path.abspath(tmp.name)
+                tmp.close()
+                path = self._sapi_worker.generate_to_file(
+                    text, tmp_path, pitch_offset + self.default_pitch)
+                if not path:
+                    try:
+                        os.unlink(tmp_path)
+                    except Exception:
+                        pass
+                    return None
+                try:
+                    return AudioSegment.from_wav(path)
+                finally:
+                    try:
+                        os.unlink(path)
+                    except Exception:
+                        pass
+            if engine in ('espeak', 'espeak_dll'):
+                audio = None
+                if ESPEAK_AVAILABLE:
+                    audio = self._generate_espeak_dll_to_memory(text, pitch_offset)
+                    if not audio:
+                        audio = self._generate_espeak_to_memory(text, pitch_offset)
+                if not audio and getattr(self, 'espeak_dll', None):
+                    # DLL in RETRIEVAL mode (no double playback).
+                    audio = self.espeak_dll.synthesize_to_memory(text, pitch_offset)
+                return audio
+            if engine == 'say':
+                return self._generate_say_to_memory(text, pitch_offset)
+            # Generic TitanTTS plugin engine (registry).
+            registry = _get_engine_registry()
+            tts_engine = registry.get_titantts_engine(engine) if registry else None
+            if tts_engine and tts_engine.is_available():
+                return tts_engine.generate(text, pitch_offset + self.default_pitch)
+        except Exception as e:
+            print(f"[StereoSpeech] segment synthesis error ({engine}): {e}")
+        return None
+
+    def supports_segment_synthesis(self):
+        """True when the active engine can render an utterance to memory.
+
+        That is the precondition for :meth:`speak_concat` (and therefore for a
+        multi-part screen-reader announcement being spoken as one clip). False
+        only for spd-say and for a host without pydub.
+        """
+        if not PYDUB_AVAILABLE:
+            return False
+        engine = getattr(self, 'engine', '')
+        if engine == 'sapi5':
+            return bool(getattr(self, '_sapi_worker', None))
+        if engine in ('espeak', 'espeak_dll'):
+            return bool(ESPEAK_AVAILABLE or getattr(self, 'espeak_dll', None))
+        if engine == 'say':
+            return bool(SAY_AVAILABLE)
+        if engine == 'spd':
+            return False
+        try:
+            registry = _get_engine_registry()
+            tts_engine = registry.get_titantts_engine(engine) if registry else None
+            return bool(tts_engine and tts_engine.is_available())
+        except Exception:
+            return False
+
     def speak_concat(self, segments, gap_ms=40):
         """Speak several ``(text, pitch_offset, position)`` parts as ONE clip.
 
@@ -2884,18 +3077,26 @@ class StereoSpeech:
         audio during synthesis, so nothing is read aloud as SSML and voices that
         ignore pitch (e.g. ScanSoft Agata) still get a clean separation.
 
-        SAPI5 only (the screen reader's engine); returns False if it cannot
-        handle the request so the caller can fall back to the paced per-segment
-        path.
+        Works with EVERY engine that can synthesize to memory (see
+        :meth:`_synthesize_segment`), not just SAPI5. It used to be SAPI-only,
+        which meant every other engine fell back to a paced, interrupt-per-part
+        pipeline whose timing could only be right for an engine that plays on
+        the pygame TTS channel -- so on eSpeak, Supertonic, SMP, Eloquence and
+        the rest the parts after the first were cut off or never spoken at all.
+        Returns False only when the engine genuinely cannot render to memory, so
+        the caller can speak the announcement as one joined line instead.
         """
-        if (not segments or not PYDUB_AVAILABLE or self.engine != 'sapi5'
-                or not getattr(self, '_sapi_worker', None)):
+        if (not segments or not PYDUB_AVAILABLE
+                or not self.supports_segment_synthesis()):
             return False
 
         with self._seq_lock:
             self._speak_seq += 1
             my_seq = self._speak_seq
-        self.stop()
+        # invalidate_pending=False: my_seq was JUST bumped-and-captured above --
+        # bumping again here would immediately supersede this very call before
+        # worker() below ever runs.
+        self.stop(invalidate_pending=False)
         # Mark speaking up front so is_speaking stays True through the (brief)
         # upfront synthesis, not just during playback -- otherwise a caller
         # polling between speak_concat() and the first audio would see "idle".
@@ -2966,27 +3167,25 @@ class StereoSpeech:
                 for idx, (text, pitch, position) in enumerate(groups):
                     if my_seq != self._speak_seq:
                         break
-                    tmp = tempfile.NamedTemporaryFile(suffix='.wav', delete=False)
-                    tmp_path = os.path.abspath(tmp.name)
-                    tmp.close()
-                    path = self._sapi_worker.generate_to_file(
-                        text, tmp_path, pitch + self.default_pitch)
-                    if not path:
-                        try:
-                            os.unlink(tmp_path)
-                        except Exception:
-                            pass
-                        continue
-                    try:
-                        seg_audio = AudioSegment.from_wav(path)
-                    except Exception:
-                        seg_audio = None
-                    finally:
-                        try:
-                            os.unlink(path)
-                        except Exception:
-                            pass
+                    seg_audio = self._synthesize_segment(text, pitch)
+                    if seg_audio is None and pitch:
+                        # Some engines refuse a pitched request but synthesize
+                        # the same text happily at their own pitch. A part read
+                        # flat beats a part not read at all.
+                        seg_audio = self._synthesize_segment(text, 0)
                     if seg_audio is None:
+                        # This engine produced nothing for this part. Dropping
+                        # it silently is the exact failure this method exists to
+                        # end, so speak the whole announcement as one plain line
+                        # instead -- the parts lose their individual pitch, but
+                        # nothing in the queue goes unspoken.
+                        if not played:
+                            if my_seq == self._speak_seq:
+                                self.is_speaking = False
+                            joined = ", ".join(g[0] for g in groups if g[0])
+                            if joined and my_seq == self._speak_seq:
+                                self.speak_async(joined, position=groups[0][2])
+                            return
                         continue
                     try:
                         seg_audio = trim_silence(

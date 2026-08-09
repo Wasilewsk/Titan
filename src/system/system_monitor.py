@@ -21,6 +21,20 @@ from src.platform_utils import get_subprocess_kwargs, IS_WINDOWS
 # Get the translation function
 _ = set_language(get_setting('language', 'pl'))
 
+
+def _get_bool_setting(key, default=True, section='system_monitor'):
+    """Read a checkbox-style setting as a real boolean.
+
+    Settings are stored as plain strings, so an unchecked box comes back as the
+    string "False" - which is truthy. Every switch that decides whether an
+    announcement happens must go through this helper, otherwise turning the
+    option off in Settings changes nothing.
+    """
+    value = get_setting(key, default, section=section)
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() in ('true', '1', 'yes', 'on')
+
 # Speaker initialization moved to avoid TTS conflicts.
 # Both the ao3 speaker and StereoSpeech are created lazily: building StereoSpeech
 # at import time forced the whole TTS stack (SAPI worker, engine registry, voice
@@ -174,8 +188,8 @@ class SystemMonitor:
             # Start ChargerMonitor if charger monitoring or battery alerts are
             # enabled and a battery is available
             try:
-                if ((get_setting('monitor_charger', True, section='system_monitor') or
-                     get_setting('monitor_battery_alerts', True, section='system_monitor')) and
+                if ((_get_bool_setting('monitor_charger', True) or
+                     _get_bool_setting('monitor_battery_alerts', True)) and
                     psutil and hasattr(psutil, 'sensors_battery') and
                     psutil.sensors_battery() is not None):
                     charger_monitor = ChargerMonitor()
@@ -211,7 +225,7 @@ class SystemMonitor:
             # Start NetworkMonitor on Windows if enabled
             try:
                 if (platform.system() == 'Windows' and
-                        get_setting('monitor_network', True, section='system_monitor')):
+                        _get_bool_setting('monitor_network', True)):
                     network_monitor = NetworkMonitor()
                     network_monitor.start()
                     self.monitors.append(network_monitor)
@@ -271,7 +285,7 @@ class ChargerMonitor(threading.Thread):
                 if battery:
                     current_status = battery.power_plugged
                     current_percentage = battery.percent
-                    charger_alerts = get_setting('monitor_charger', True, section='system_monitor')
+                    charger_alerts = _get_bool_setting('monitor_charger', True)
 
                     # Check for charger connection/disconnection
                     if self.previous_status is not None and current_status != self.previous_status:
@@ -345,7 +359,7 @@ class ChargerMonitor(threading.Thread):
         connected or the level recovers above the threshold.
         """
         try:
-            if not get_setting('monitor_battery_alerts', True, section='system_monitor'):
+            if not _get_bool_setting('monitor_battery_alerts', True):
                 return
 
             power_saving = is_power_saving_active()
@@ -652,10 +666,11 @@ class NetworkMonitor(threading.Thread):
         self.daemon = True
         self.running = True
         self.previous_ssid = None
+        self.previous_wifi_state = None
         self.previous_interfaces = set()
 
-    def _get_wifi_ssid(self):
-        """Return current WiFi SSID via netsh, or None if not connected"""
+    def _get_wifi_status(self):
+        """Return (state, ssid) for the WiFi interface via netsh, or (None, None) if unavailable"""
         try:
             result = subprocess.run(
                 ['netsh', 'wlan', 'show', 'interfaces'],
@@ -663,6 +678,8 @@ class NetworkMonitor(threading.Thread):
                 encoding='utf-8', errors='replace', timeout=5,
                 **get_subprocess_kwargs()
             )
+            state = None
+            ssid = None
             for line in result.stdout.splitlines():
                 line = line.strip()
                 # "SSID" line but NOT "BSSID" line
@@ -670,11 +687,14 @@ class NetworkMonitor(threading.Thread):
                     key, _, val = line.partition(':')
                     key = key.strip()
                     val = val.strip()
-                    if key.upper() == 'SSID' and val:
-                        return val
+                    if key.upper() == 'STATE' and val:
+                        state = val.lower()
+                    elif key.upper() == 'SSID' and val:
+                        ssid = val
+            return state, ssid
         except Exception:
             pass
-        return None
+        return None, None
 
     def _get_active_ethernet(self):
         """Return set of active non-WiFi interfaces that have an IPv4 address"""
@@ -702,8 +722,10 @@ class NetworkMonitor(threading.Thread):
         return active
 
     def _init_state(self):
-        self.previous_ssid = self._get_wifi_ssid()
+        self.previous_wifi_state, self.previous_ssid = self._get_wifi_status()
         self.previous_interfaces = self._get_active_ethernet()
+
+    WIFI_CONNECTING_STATES = {'connecting', 'associating', 'authenticating'}
 
     def run(self):
         # Wait for system to settle before monitoring
@@ -712,7 +734,11 @@ class NetworkMonitor(threading.Thread):
         while self.running:
             try:
                 # --- WiFi ---
-                current_ssid = self._get_wifi_ssid()
+                current_wifi_state, current_ssid = self._get_wifi_status()
+                if current_wifi_state in self.WIFI_CONNECTING_STATES and self.previous_wifi_state not in self.WIFI_CONNECTING_STATES:
+                    self.on_connecting()
+                self.previous_wifi_state = current_wifi_state
+
                 if current_ssid != self.previous_ssid:
                     if current_ssid:
                         self.on_connected(current_ssid)
@@ -730,7 +756,10 @@ class NetworkMonitor(threading.Thread):
 
             except Exception as e:
                 print(f"NetworkMonitor error: {e}")
-            time.sleep(5)
+            time.sleep(1)
+
+    def on_connecting(self):
+        play_sound('system/network_connecting.ogg')
 
     def on_connected(self, name):
         play_sound('system/network_connect.ogg')

@@ -78,21 +78,40 @@ if IS_WINDOWS:
         warnings.filterwarnings("ignore", category=UserWarning, module="comtypes")
 
         class COMErrorSuppressor:
+            """Suppress noisy COM/screen-reader stderr output without hiding
+            real application errors.
+
+            Only output that contains a COM-specific keyword AND originates
+            from a known noisy module (comtypes, pythoncom, gwspeak, jfwapi,
+            comtypes.client, etc.) is suppressed.  Generic Python errors
+            (ValueError, SystemError, full tracebacks) are always forwarded."""
             def __init__(self):
                 self.original_stderr = sys.stderr
                 self.buffer = ""
                 self.suppress_until_newline = 0
+
+            # COM / screen-reader keywords that indicate noise, not real bugs.
+            _COM_KEYWORDS = frozenset([
+                "comtypes", "com method", "unknwn", "iunknown",
+                "win32 exception", "releasing iunknown",
+                "__del__", "gwspeak", "jfwapi",
+            ])
+
+            # Modules whose tracebacks are always noise (screen-reader drivers).
+            _NOISY_MODULES = frozenset([
+                "comtypes", "pythoncom", "gwspeak", "jfwapi",
+                "comtypes.client", "comtypes._commeta",
+            ])
 
             def write(self, text):
                 if text.strip() in [':', '', ' ']:
                     return
                 self.buffer += text
                 buffer_lower = self.buffer.lower()
-                if any(keyword in buffer_lower for keyword in [
-                    "systemerror", "valueerror", "comtypes", "com method",
-                    "__del__", "unknwn", "iunknown", "traceback", "gwspeak", "jfwapi",
-                    "win32 exception", "releasing iunknown", "exception occurred"
-                ]):
+                # Suppress only if a COM-specific keyword is present.
+                # Never suppress generic Python error terms (ValueError,
+                # SystemError, traceback) on their own.
+                if any(keyword in buffer_lower for keyword in self._COM_KEYWORDS):
                     self.suppress_until_newline = 100
                     self.buffer = ""
                     return
@@ -136,7 +155,6 @@ try:
     if not IS_MACOS:
         # On macOS, keyboard import can hang without Accessibility permissions
         import keyboard
-    import speech_recognition as sr
     import pygame
     import random
     import psutil
@@ -160,10 +178,6 @@ try:
     import threading
     import os
     import sys
-    try:
-        from bg5reader import bg5reader
-    except ImportError:
-        pass
 
     # Import libraries used by widgets (applets) for compilation compatibility
     import gettext
@@ -179,6 +193,41 @@ try:
 
 except ImportError as e:
     print(f"Warning: Could not import component/widget library: {e}")
+
+# Heavy modules deferred to background -- keeps startup fast.
+# These are imported lazily so components that need them can trigger the
+# load, but the main thread is never blocked by their init.
+_heavy_imports_done = False
+_heavy_imports_lock = threading.Lock()
+
+def _load_heavy_imports():
+    """Import heavy optional modules in a background thread.
+
+    Safe to call multiple times; only the first call does the work.
+    Components that depend on these modules should call this and then
+    access them via the module globals (``sr``, ``bg5reader``).
+    """
+    global _heavy_imports_done
+    if _heavy_imports_done:
+        return
+    with _heavy_imports_lock:
+        if _heavy_imports_done:
+            return
+        try:
+            import speech_recognition as sr  # noqa: F401,F811
+            globals()['sr'] = sr
+        except ImportError:
+            pass
+        try:
+            from bg5reader import bg5reader  # noqa: F401,F811
+            globals()['bg5reader'] = bg5reader
+        except ImportError:
+            pass
+        _heavy_imports_done = True
+
+# Fire the deferred import in the background so it's ready by the time
+# any component actually needs it.
+threading.Thread(target=_load_heavy_imports, daemon=True).start()
 
 # Fix COM errors early (Windows only)
 if IS_WINDOWS:
@@ -199,8 +248,8 @@ from src.controller.controller_ui import initialize_controller_system, shutdown_
 from src.controller.controller_modes import initialize_controller_modes
 from src.ui.notificationcenter import create_notifications_file, NOTIFICATIONS_FILE_PATH, start_monitoring
 from src.ui.shutdown_question import show_shutdown_dialog
-from src.titan_core.app_manager import find_application_by_shortname, open_application
-from src.titan_core.game_manager import *
+from src.titan_core.app_manager import find_application_by_shortname, open_application, read_app_info
+from src.titan_core.game_manager import get_games, open_game, get_games_by_platform
 from src.titan_core.component_manager import ComponentManager
 from src.ui.menu import MenuBar
 if IS_WINDOWS:
@@ -216,7 +265,7 @@ from src.system.updater import check_for_updates_on_startup
 # Note: translation.py will auto-detect system language if no preference is saved
 _ = set_language(get_setting('language', get_system_language()))
 
-VERSION = "0.5.5"
+VERSION = "0.5.7"
 try:
     speaker = accessible_output3.outputs.auto.Auto()
 except Exception as _e:
@@ -469,6 +518,26 @@ def main(command_line_args=None):
             except Exception as e:
                 print(f"Error applying Titan TTS SAPI registration: {e}")
 
+            # .TCA/.TCD file associations -- HKCU only, no admin/UAC needed,
+            # so unlike SAPI registration this can just run silently every
+            # startup (idempotent, cheap).
+            try:
+                from src.system.file_association import register as register_file_association, is_registered as file_association_registered
+                if not file_association_registered():
+                    register_file_association()
+            except Exception as e:
+                print(f"Error registering .tca/.tcd file associations: {e}")
+
+            # The Titan Action Bus: applications and games connect back to it
+            # so Titan (and its AI) can call into the instance the user
+            # actually has open. Cheap, idempotent, and a daemon thread - an
+            # add-on that never joins costs nothing.
+            try:
+                from src.titan_core import actions as titan_actions_api
+                titan_actions_api.start()
+            except Exception as e:
+                print(f"Error starting the Titan Action Bus: {e}")
+
             # Install Copilot key hook on the main thread (LL hook binds to it).
             # Done here, before GUI/IUI startup, so the hook never blocks them.
             try:
@@ -537,6 +606,33 @@ def main(command_line_args=None):
         except Exception as e:
             print(f"Error adding to sys.path: {e}")
 
+        # .TCA/.TCD package installation (e.g. Titan was launched via the
+        # Windows Explorer file association for a double-clicked package).
+        # Installs into the per-user overlay data directory, then hands off
+        # to the app-launch path below (by filling in command_line_args.
+        # application) or launches a game directly. Other add-on kinds have
+        # no direct "launch" concept -- installing is enough, normal startup
+        # further down picks them up like any other already-installed add-on.
+        try:
+            if command_line_args and getattr(command_line_args, 'install_package', None):
+                from src.titan_core.package_install import install_package
+                from src.titan_core import titan_package as _titan_package
+                installed = install_package(command_line_args.install_package)
+                if installed and installed.kind == _titan_package.KIND_APP:
+                    app_info = read_app_info(installed.extracted_dir, lang)
+                    if app_info and app_info.get('shortname'):
+                        command_line_args.application = app_info['shortname']
+                        command_line_args.file_path = None
+                elif installed and installed.kind == _titan_package.KIND_GAME:
+                    from src.titan_core.game_manager import read_game_info
+                    game_info = read_game_info(installed.extracted_dir)
+                    if game_info:
+                        game_info['platform'] = game_info.get('platform', 'Titan-Games')
+                        open_game(game_info)
+                        return True
+        except Exception as e:
+            print(f"Error installing package: {e}")
+
         # Sprawdzenie argumentów wiersza poleceń
         try:
             if command_line_args and command_line_args.application:
@@ -574,9 +670,14 @@ def main(command_line_args=None):
                     # Create wx.App for Klango mode
                     klango_app = wx.App(False)
 
-                # Check for updates (same as GUI mode)
+                # Check for updates (same as GUI mode). A pending/applied
+                # update is mandatory: do not start the suite.
                 try:
-                    update_result = check_for_updates_on_startup()
+                    if check_for_updates_on_startup():
+                        print("Update pending or applied; not starting Klango mode")
+                        sys.exit(0)
+                except SystemExit:
+                    raise
                 except Exception as e:
                     print(f"Error checking for updates in Klango mode: {e}")
                     import traceback
@@ -778,9 +879,14 @@ def main(command_line_args=None):
                     else:
                         launcher_wx_app = wx.App(False)
 
-                    # Check for updates (same as GUI mode)
+                    # Check for updates (same as GUI mode). A pending/applied
+                    # update is mandatory: do not start the suite.
                     try:
-                        update_result = check_for_updates_on_startup()
+                        if check_for_updates_on_startup():
+                            print("Update pending or applied; not starting Launcher mode")
+                            sys.exit(0)
+                    except SystemExit:
+                        raise
                     except Exception as e:
                         print(f"Error checking for updates in Launcher mode: {e}")
                         import traceback
@@ -1041,7 +1147,31 @@ if __name__ == "__main__":
     parser.add_argument('--profile', action='store_true',
                        help='Run under cProfile and write a .pstats dump on exit '
                             '(optimization profiling - see src/scripts/profile_hotpaths.py)')
+    parser.add_argument('--install-package', default=None, metavar='PATH',
+                       help='Install a .tca/.tcd package file into the user data '
+                            'directory, then launch it (apps/games) or surface it '
+                            '(other add-on kinds). Used by the Explorer file '
+                            'association for double-clicked packages.')
+    parser.add_argument('--run-script', default=None, metavar='PATH',
+                       help='Run a Titan Script (.TCS) once Titan has started. '
+                            'Used by the Explorer file association for '
+                            'double-clicked scripts. Needs the Macro Manager '
+                            'component, which is what understands the language.')
     args = parser.parse_args()
+
+    # `titan script.tcs` means the same as `titan --run-script script.tcs`:
+    # a bare path is what a shell, a shortcut and a drag-and-drop all produce,
+    # and it would otherwise be read as an application shortname.
+    try:
+        from src.titan_core import script_launch as _script_launch
+        if not args.run_script and _script_launch.looks_like_script(args.application):
+            args.run_script = args.application
+            args.application = args.file_path
+            args.file_path = None
+        if args.run_script:
+            _script_launch.set_pending(args.run_script)
+    except Exception as _script_error:
+        print(f"[TitanScript] could not accept the script argument: {_script_error}")
 
     # Optimization profiling (Phase 0 of the code-optimization plan).
     # Enabled with --profile: captures main() initialization and the GUI event
@@ -1135,14 +1265,17 @@ if __name__ == "__main__":
         print(f"Error loading settings: {e}")
         settings = {}
 
-    # Check for updates using the main app instance
+    # Check for updates using the main app instance.
+    # If an update is available it is mandatory: the suite must NOT start the
+    # outdated version. check_for_updates_on_startup() returns True in that
+    # case (update applied, failed, or declined), and we exit before building
+    # the GUI.
     try:
-        # Check for updates - this will show dialog if update available
-        update_result = check_for_updates_on_startup()
-
-        # If update was applied, the application will exit automatically
-        # If no update or user cancelled, continue normally
-
+        if check_for_updates_on_startup():
+            print("Update pending or applied; not starting Titan suite")
+            sys.exit(0)
+    except SystemExit:
+        raise
     except Exception as e:
         print(f"Error checking for updates: {e}")
         import traceback
@@ -1254,17 +1387,19 @@ if __name__ == "__main__":
         from src.settings.titan_im_config import load_titan_im_config
 
         # Get Titan-Net server configuration from settings
+        # Whichever source answers, the auto-connect thread below reads its
+        # settings from titan_net_settings - so both branches have to bind it.
+        # Only the fallback branch used to, which made every normal startup end
+        # in "Error during Titan-Net auto-connect: name 'titan_net_settings' is
+        # not defined" and silently skip auto-connect altogether.
         try:
             im_config = load_titan_im_config()
-            tn = im_config.get('titannet_settings', {})
-            server_host = tn.get('server_host', 'titosofttitan.com')
-            server_port = int(tn.get('server_port', 8001))
-            http_port = int(tn.get('http_port', 8000))
+            titan_net_settings = im_config.get('titannet_settings', {}) or {}
         except Exception:
-            titan_net_settings = settings.get('titan_net', {})
-            server_host = titan_net_settings.get('server_host', 'titosofttitan.com')
-            server_port = int(titan_net_settings.get('server_port', 8001))
-            http_port = int(titan_net_settings.get('http_port', 8000))
+            titan_net_settings = settings.get('titan_net', {}) or {}
+        server_host = titan_net_settings.get('server_host', 'titosofttitan.com')
+        server_port = int(titan_net_settings.get('server_port', 8001))
+        http_port = int(titan_net_settings.get('http_port', 8000))
 
         print(f"Titan-Net configuration: host={server_host}, ws_port={server_port}, http_port={http_port}")
 

@@ -14,6 +14,7 @@ except ImportError:
 import atexit
 import hashlib
 import os
+import re
 import secrets
 import random
 import threading
@@ -1085,6 +1086,26 @@ class Database:
             )
             """)
 
+            # =========================================================
+            # User blocks (personal "full ignore")
+            # =========================================================
+            # blocker_id has blocked blocked_id. Enforcement is symmetric
+            # ("full ignore"): the blocked user cannot send private messages to
+            # the blocker, neither party sees the other's room/chat messages,
+            # and neither sees the other as online. Purely a per-user relation —
+            # nothing to do with moderation bans.
+            cursor.execute("""
+            CREATE TABLE IF NOT EXISTS user_blocks (
+                blocker_id INTEGER NOT NULL,
+                blocked_id INTEGER NOT NULL,
+                created_at TEXT NOT NULL,
+                PRIMARY KEY (blocker_id, blocked_id),
+                FOREIGN KEY (blocker_id) REFERENCES users(id),
+                FOREIGN KEY (blocked_id) REFERENCES users(id)
+            )
+            """)
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_user_blocks_blocked ON user_blocks(blocked_id)")
+
             # Sessions table for WebSocket connections
             cursor.execute("""
             CREATE TABLE IF NOT EXISTS sessions (
@@ -1304,6 +1325,66 @@ class Database:
             )
             """)
 
+            # ---- Remote UI: screens the SERVER defines, clients render ----
+            # A server-side component that needs a new dialog stores a
+            # declarative JSON definition here instead of shipping Python.
+            # Every client has one generic renderer, so a brand new screen
+            # reaches users who never updated Titan. 'handler' names the
+            # server-side function that processes submits (see remote_ui.py);
+            # 'store' is the built-in that just records the values.
+            cursor.execute("""
+            CREATE TABLE IF NOT EXISTS remote_screens (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                slug TEXT UNIQUE NOT NULL,
+                title TEXT NOT NULL,
+                definition TEXT NOT NULL,
+                handler TEXT NOT NULL DEFAULT 'store',
+                audience TEXT NOT NULL DEFAULT 'everyone',
+                in_menu INTEGER NOT NULL DEFAULT 1,
+                active INTEGER NOT NULL DEFAULT 1,
+                version INTEGER NOT NULL DEFAULT 1,
+                created_by INTEGER NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                FOREIGN KEY (created_by) REFERENCES users(id)
+            )
+            """)
+
+            # What users sent back from a remote screen handled by 'store'.
+            cursor.execute("""
+            CREATE TABLE IF NOT EXISTS remote_screen_submissions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                slug TEXT NOT NULL,
+                user_id INTEGER NOT NULL,
+                action TEXT NOT NULL,
+                payload TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY (user_id) REFERENCES users(id)
+            )
+            """)
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_remote_sub_slug "
+                           "ON remote_screen_submissions(slug, created_at)")
+
+            # ---- Server sound registry ----
+            # Sounds uploaded by staff and played on demand at one user, a
+            # role, a room or everybody. Audio lives on disk under
+            # server_sounds/; the row keeps the metadata plus a sha256 so
+            # clients can cache by content and never re-download.
+            cursor.execute("""
+            CREATE TABLE IF NOT EXISTS server_sounds (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT UNIQUE NOT NULL,
+                description TEXT,
+                filename TEXT NOT NULL,
+                mime TEXT,
+                size INTEGER NOT NULL DEFAULT 0,
+                sha256 TEXT NOT NULL,
+                uploaded_by INTEGER NOT NULL,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY (uploaded_by) REFERENCES users(id)
+            )
+            """)
+
             # Room bans table (extended with ban types)
             cursor.execute("""
             CREATE TABLE IF NOT EXISTS room_bans (
@@ -1491,10 +1572,62 @@ class Database:
                     body TEXT,
                     received_at TEXT NOT NULL,
                     read INTEGER DEFAULT 0,
+                    message_id TEXT,
+                    in_reply_to TEXT,
+                    body_html TEXT,
+                    content_type TEXT DEFAULT 'text/plain',
                     FOREIGN KEY (owner_user_id) REFERENCES users(id)
                 )
             """)
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_mail_owner ON mail_messages(owner_user_id, folder)")
+
+            # Migration: RFC 5322 threading identifiers. `message_id` also
+            # de-duplicates inbound deliveries (Postfix retries the pipe after
+            # a temporary failure, which can re-deliver a message the server
+            # already stored), and lets a reply sent from Titan quote the
+            # incoming Message-ID so the thread stays intact in the recipient's
+            # mail client.
+            for column in ('message_id', 'in_reply_to'):
+                try:
+                    cursor.execute(f"SELECT {column} FROM mail_messages LIMIT 1")
+                except sqlite3.OperationalError:
+                    cursor.execute(f"ALTER TABLE mail_messages ADD COLUMN {column} TEXT")
+                    print(f"Migration: Added '{column}' column to mail_messages table")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_mail_msgid ON mail_messages(owner_user_id, message_id)")
+
+            # Migration: rich bodies. `body` stays the readable plain-text
+            # version every existing client already reads; `body_html` is the
+            # formatted alternative (kept from an inbound multipart message, or
+            # produced by the composer) and `content_type` records what the
+            # author actually wrote, so the Mail client can render a message the
+            # way it was meant instead of guessing from the text.
+            for column, definition in (('body_html', 'TEXT'),
+                                       ("content_type", "TEXT DEFAULT 'text/plain'")):
+                try:
+                    cursor.execute(f"SELECT {column} FROM mail_messages LIMIT 1")
+                except sqlite3.OperationalError:
+                    cursor.execute(f"ALTER TABLE mail_messages ADD COLUMN {column} {definition}")
+                    print(f"Migration: Added '{column}' column to mail_messages table")
+
+            # Backfill: messages delivered before addresses were normalized hold
+            # the raw header ("Some One <someone@gmail.com>") in from_addr, which
+            # the Mail client both displays and reuses as the recipient when
+            # replying - making those replies unroutable.
+            cursor.execute(
+                "SELECT id, from_addr, to_addr FROM mail_messages "
+                "WHERE from_addr LIKE '%<%' OR to_addr LIKE '%<%'"
+            )
+            unnormalized = cursor.fetchall()
+            for row in unnormalized:
+                mail_id = self._row_get(row, 'id', 0)
+                clean_from = self.normalize_mail_address(self._row_get(row, 'from_addr', 1))
+                clean_to = self.normalize_mail_address(self._row_get(row, 'to_addr', 2))
+                cursor.execute(
+                    "UPDATE mail_messages SET from_addr = ?, to_addr = ? WHERE id = ?",
+                    (clean_from, clean_to, mail_id),
+                )
+            if unnormalized:
+                print(f"Migration: Normalized {len(unnormalized)} mail address(es) in mail_messages")
 
             # Migration: rebuild forum_bans to scope bans per-group. The old
             # schema had UNIQUE(user_id) (one ban per user, server-wide). The
@@ -2269,10 +2402,25 @@ class Database:
         domain = self._mail_domain()
         return f"{username}@{domain}" if domain else username
 
+    @staticmethod
+    def normalize_mail_address(address: str) -> str:
+        """Reduce a recipient/sender field to a bare ``user@host``.
+
+        Anything that reaches us from a real mail client may carry a display
+        name (``Some One <someone@gmail.com>``); that form must never be used
+        as an envelope recipient or matched against a username."""
+        address = (address or '').strip()
+        if not address:
+            return ''
+        from email.utils import parseaddr
+        _name, parsed = parseaddr(address)
+        parsed = (parsed or '').strip()
+        return parsed or address.strip('<>').strip()
+
     def resolve_local_user_by_address(self, address: str) -> Optional[Dict[str, Any]]:
         """Return the local user a mailbox address belongs to, or None. Matches
         local-part (case-insensitive) to a username when the domain is ours."""
-        address = (address or '').strip().lower()
+        address = self.normalize_mail_address(address).lower()
         if '@' not in address:
             return None
         local, _, domain = address.partition('@')
@@ -2290,15 +2438,38 @@ class Database:
 
     @_serialized_write
     def store_incoming_mail(self, owner_user_id: int, from_addr: str, to_addr: str,
-                            subject: str, body: str, received_at: Optional[str] = None) -> Dict[str, Any]:
-        """Persist a delivered message into a user's inbox."""
+                            subject: str, body: str, received_at: Optional[str] = None,
+                            message_id: Optional[str] = None,
+                            in_reply_to: Optional[str] = None,
+                            body_html: Optional[str] = None,
+                            content_type: Optional[str] = None) -> Dict[str, Any]:
+        """Persist a delivered message into a user's inbox.
+
+        Re-delivery of a message we already hold (same owner + Message-ID) is a
+        no-op: Postfix retries the delivery pipe after any temporary failure,
+        including one where the row was written but the response was lost."""
         received_at = received_at or datetime.now().isoformat()
+        from_addr = self.normalize_mail_address(from_addr)
+        to_addr = self.normalize_mail_address(to_addr)
+        message_id = (message_id or '').strip() or None
+        in_reply_to = (in_reply_to or '').strip() or None
         conn = self.get_connection()
         cursor = conn.cursor()
+        if message_id:
+            cursor.execute(
+                "SELECT id FROM mail_messages WHERE owner_user_id = ? AND message_id = ?",
+                (owner_user_id, message_id),
+            )
+            existing = cursor.fetchone()
+            if existing:
+                mail_id = self._row_get(existing, 'id', 0)
+                conn.close()
+                return {"success": True, "mail_id": mail_id, "duplicate": True}
         cursor.execute(
-            "INSERT INTO mail_messages (owner_user_id, direction, folder, from_addr, to_addr, subject, body, received_at, read) "
-            "VALUES (?, 'in', 'inbox', ?, ?, ?, ?, ?, 0)",
-            (owner_user_id, from_addr, to_addr, subject, body, received_at),
+            "INSERT INTO mail_messages (owner_user_id, direction, folder, from_addr, to_addr, subject, body, received_at, read, message_id, in_reply_to, body_html, content_type) "
+            "VALUES (?, 'in', 'inbox', ?, ?, ?, ?, ?, 0, ?, ?, ?, ?)",
+            (owner_user_id, from_addr, to_addr, subject, body, received_at, message_id,
+             in_reply_to, (body_html or '') or None, content_type or 'text/plain'),
         )
         mail_id = cursor.lastrowid
         conn.commit()
@@ -2310,7 +2481,9 @@ class Database:
         conn = self.get_connection()
         cursor = conn.cursor()
         cursor.execute(
-            "SELECT id, direction, folder, from_addr, to_addr, subject, received_at, read "
+            # content_type travels with the list so the client can say what kind
+            # of message a row is without fetching every body.
+            "SELECT id, direction, folder, from_addr, to_addr, subject, received_at, read, content_type "
             "FROM mail_messages WHERE owner_user_id = ? AND folder = ? "
             "ORDER BY id DESC LIMIT ?",
             (user_id, folder, limit),
@@ -2364,13 +2537,48 @@ class Database:
         conn.close()
         return {"success": True}
 
-    def send_user_mail(self, user_id: int, to_addr: str, subject: str, body: str) -> Dict[str, Any]:
+    def find_thread_parent(self, user_id: int, peer_addr: str, subject: str) -> Optional[str]:
+        """The Message-ID this outgoing mail is most likely answering.
+
+        The Mail clients compose a reply as a plain new message ("Re: <subject>"
+        to the sender's address), so the thread has to be recovered here: the
+        newest message this user received from that address whose subject
+        matches once the reply prefixes are stripped."""
+        peer_addr = self.normalize_mail_address(peer_addr).lower()
+        base = re.sub(r'^(?:\s*(?:re|odp|fwd|fw)\s*:\s*)+', '', (subject or ''),
+                      flags=re.IGNORECASE).strip().lower()
+        if not peer_addr or not base:
+            return None
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT subject, message_id FROM mail_messages "
+            "WHERE owner_user_id = ? AND folder = 'inbox' AND lower(from_addr) = ? "
+            "AND message_id IS NOT NULL ORDER BY id DESC LIMIT 20",
+            (user_id, peer_addr),
+        )
+        rows = cursor.fetchall()
+        conn.close()
+        for row in rows:
+            candidate = re.sub(r'^(?:\s*(?:re|odp|fwd|fw)\s*:\s*)+',
+                               '', self._row_get(row, 'subject', 0) or '',
+                               flags=re.IGNORECASE).strip().lower()
+            if candidate == base:
+                return self._row_get(row, 'message_id', 1)
+        return None
+
+    def send_user_mail(self, user_id: int, to_addr: str, subject: str, body: str,
+                       message_id: Optional[str] = None,
+                       body_html: Optional[str] = None,
+                       content_type: Optional[str] = None) -> Dict[str, Any]:
         """Persist an outgoing message to the sender's 'sent' folder. If the
         recipient is a local Titan-Net user, also deposit it in their inbox.
         Returns ``external_recipient`` so the caller (HTTP layer) knows whether
         it must also hand the message to the outbound mailer for a remote
         address (models does not import the mailer)."""
-        to_addr = (to_addr or '').strip()
+        # A recipient copied out of a received message can still carry the
+        # sender's display name; only the bare address is routable.
+        to_addr = self.normalize_mail_address(to_addr)
         subject = (subject or '').strip()
         if not to_addr:
             return {"success": False, "error": "Recipient is required"}
@@ -2379,20 +2587,27 @@ class Database:
             return {"success": False, "error": "User not found"}
         from_addr = self.user_mail_address(sender['username'])
         now = datetime.now().isoformat()
+        in_reply_to = self.find_thread_parent(user_id, to_addr, subject)
         conn = self.get_connection()
         cursor = conn.cursor()
+        body_html = (body_html or '') or None
+        content_type = content_type or 'text/plain'
         cursor.execute(
-            "INSERT INTO mail_messages (owner_user_id, direction, folder, from_addr, to_addr, subject, body, received_at, read) "
-            "VALUES (?, 'out', 'sent', ?, ?, ?, ?, ?, 1)",
-            (user_id, from_addr, to_addr, subject, body, now),
+            "INSERT INTO mail_messages (owner_user_id, direction, folder, from_addr, to_addr, subject, body, received_at, read, message_id, in_reply_to, body_html, content_type) "
+            "VALUES (?, 'out', 'sent', ?, ?, ?, ?, ?, 1, ?, ?, ?, ?)",
+            (user_id, from_addr, to_addr, subject, body, now, message_id, in_reply_to,
+             body_html, content_type),
         )
         conn.commit()
         conn.close()
         # Internal delivery to a local mailbox.
         local = self.resolve_local_user_by_address(to_addr)
         if local:
-            self.store_incoming_mail(local['id'], from_addr, to_addr, subject, body, now)
-        return {"success": True, "from_addr": from_addr,
+            self.store_incoming_mail(local['id'], from_addr, to_addr, subject, body, now,
+                                     message_id=message_id, in_reply_to=in_reply_to,
+                                     body_html=body_html, content_type=content_type)
+        return {"success": True, "from_addr": from_addr, "to_addr": to_addr,
+                "in_reply_to": in_reply_to,
                 "external_recipient": None if local else to_addr}
 
     @_serialized_write
@@ -2555,8 +2770,79 @@ class Database:
         conn.close()
         return room_ids
 
-    def get_online_users(self) -> List[Dict[str, Any]]:
-        """Get list of online users"""
+    # ==================== User blocks ("full ignore") ====================
+
+    @_serialized_write
+    def block_user(self, blocker_id: int, blocked_id: int) -> Dict[str, Any]:
+        """Record that ``blocker_id`` blocks ``blocked_id``. Idempotent."""
+        if blocker_id == blocked_id:
+            return {"success": False, "error": "You cannot block yourself"}
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT id FROM users WHERE id = ?", (blocked_id,))
+        if not cursor.fetchone():
+            conn.close()
+            return {"success": False, "error": "User not found"}
+        cursor.execute(
+            "INSERT OR IGNORE INTO user_blocks (blocker_id, blocked_id, created_at) VALUES (?, ?, ?)",
+            (blocker_id, blocked_id, datetime.now().isoformat()),
+        )
+        conn.commit()
+        conn.close()
+        return {"success": True}
+
+    @_serialized_write
+    def unblock_user(self, blocker_id: int, blocked_id: int) -> Dict[str, Any]:
+        """Remove a block. Idempotent."""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            "DELETE FROM user_blocks WHERE blocker_id = ? AND blocked_id = ?",
+            (blocker_id, blocked_id),
+        )
+        conn.commit()
+        conn.close()
+        return {"success": True}
+
+    def get_blocked_users(self, blocker_id: int) -> List[Dict[str, Any]]:
+        """List the users ``blocker_id`` has blocked (for the management list)."""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT u.id, u.username, u.titan_number, b.created_at "
+            "FROM user_blocks b JOIN users u ON u.id = b.blocked_id "
+            "WHERE b.blocker_id = ? ORDER BY b.created_at DESC",
+            (blocker_id,),
+        )
+        rows = [dict(r) for r in cursor.fetchall()]
+        conn.close()
+        return rows
+
+    def _blocked_pair_ids(self, user_id: int, cursor) -> set:
+        """Return the set of user ids that are mutually invisible to ``user_id``
+        — everyone they blocked plus everyone who blocked them. Uses the caller's
+        cursor to avoid opening a second connection."""
+        cursor.execute(
+            "SELECT blocked_id AS other FROM user_blocks WHERE blocker_id = ? "
+            "UNION SELECT blocker_id AS other FROM user_blocks WHERE blocked_id = ?",
+            (user_id, user_id),
+        )
+        return {self._row_get(r, 'other') for r in cursor.fetchall()}
+
+    def get_all_blocks(self) -> List[Dict[str, Any]]:
+        """Return every (blocker_id, blocked_id) pair — used by the WebSocket
+        server to build its in-memory block map at startup."""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT blocker_id, blocked_id FROM user_blocks")
+        rows = [dict(r) for r in cursor.fetchall()]
+        conn.close()
+        return rows
+
+    def get_online_users(self, viewer_id: Optional[int] = None) -> List[Dict[str, Any]]:
+        """Get list of online users. When ``viewer_id`` is given, users that are
+        mutually blocked with the viewer ("full ignore") are omitted so the two
+        parties never see each other as online."""
         conn = self.get_connection()
         cursor = conn.cursor()
 
@@ -2566,6 +2852,10 @@ class Database:
         """)
 
         users = [dict(row) for row in cursor.fetchall()]
+        if viewer_id is not None:
+            hidden = self._blocked_pair_ids(viewer_id, cursor)
+            if hidden:
+                users = [u for u in users if u['id'] not in hidden]
         conn.close()
         return users
 
@@ -3344,28 +3634,35 @@ class Database:
 
     @_serialized_write
     def delete_forum_topic(self, topic_id: int, user_id: int) -> bool:
-        """Delete forum topic (author or admin only)"""
+        """Delete forum topic. Allowed for the author, a server admin/moderator,
+        or — for topics inside a group's forum — a moderator/owner of that
+        group."""
         conn = self.get_connection()
         cursor = conn.cursor()
 
-        # Check if user is author or admin
-        cursor.execute("""
-            SELECT author_id FROM forum_topics WHERE id = ?
-        """, (topic_id,))
+        cursor.execute("SELECT author_id, forum_id FROM forum_topics WHERE id = ?", (topic_id,))
         topic = cursor.fetchone()
 
         if not topic:
             conn.close()
             return False
 
-        # Get user info
+        author_id = self._row_get(topic, 'author_id')
+        forum_id = self._row_get(topic, 'forum_id')
+
         user = self.get_user_by_id(user_id)
         if not user:
             conn.close()
             return False
 
-        # Only author or admin can delete
-        if topic['author_id'] != user_id and not user.get('is_admin', False):
+        allowed = (author_id == user_id) or bool(user.get('is_admin')) or self.is_moderator(user_id)
+        if not allowed and forum_id is not None:
+            cursor.execute("SELECT group_id FROM group_forums WHERE id = ?", (forum_id,))
+            grow = cursor.fetchone()
+            if grow:
+                allowed = self.is_group_moderator(self._row_get(grow, 'group_id'), user_id)
+
+        if not allowed:
             conn.close()
             return False
 
@@ -3584,6 +3881,26 @@ class Database:
             return True
         user = self.get_user_by_id(user_id)
         return bool(user and user.get('is_admin'))
+
+    @_serialized_write
+    def rename_group(self, group_id: int, new_name: str, user_id: int) -> Dict[str, Any]:
+        """Rename a group. Unlike other group settings (owner-only via
+        update_group), renaming is also allowed for group moderators."""
+        if not self.is_group_moderator(group_id, user_id):
+            return {"success": False, "error": "Only a group moderator or owner can rename the group"}
+        new_name = (new_name or '').strip()
+        if not new_name:
+            return {"success": False, "error": "Group name is required"}
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT id FROM groups WHERE id = ?", (group_id,))
+        if not cursor.fetchone():
+            conn.close()
+            return {"success": False, "error": "Group not found"}
+        cursor.execute("UPDATE groups SET name = ? WHERE id = ?", (new_name, group_id))
+        conn.commit()
+        conn.close()
+        return {"success": True, "group_id": group_id, "name": new_name}
 
     @_serialized_write
     def delete_group(self, group_id: int, user_id: int) -> Dict[str, Any]:
@@ -3923,32 +4240,48 @@ class Database:
     def request_topic_move(self, topic_id: int, to_forum_id: int, requested_by: int) -> Dict[str, Any]:
         """Move a thread to another forum.
 
-        Within the SAME group the move is immediate (requester must moderate
-        that group). To a forum in ANOTHER group it creates a PENDING request
-        that a moderator of the TARGET group must approve. Returns a dict with
-        ``status`` 'moved' or 'pending'."""
+        The move is immediate when the requester moderates BOTH ends - the same
+        group, or two different groups they moderate or own. Approval only
+        exists to protect a group from having threads pushed into it by an
+        outsider, so a request the requester would approve themselves is not a
+        request at all: it used to be filed anyway, which left the thread where
+        it was with nobody notified.
+
+        Otherwise a PENDING request is created for the TARGET group's
+        moderators. Returns ``status`` 'moved' or 'pending' plus the names
+        involved so the caller can say what moved from where to where."""
         conn = self.get_connection()
         cursor = conn.cursor()
-        cursor.execute("SELECT forum_id FROM forum_topics WHERE id = ?", (topic_id,))
+        cursor.execute("SELECT forum_id, title, author_id FROM forum_topics WHERE id = ?", (topic_id,))
         trow = cursor.fetchone()
         if not trow:
             conn.close()
             return {"success": False, "error": "Topic not found"}
         from_forum_id = self._row_get(trow, 'forum_id')
+        topic_title = self._row_get(trow, 'title', 1)
+        topic_author = self._row_get(trow, 'author_id', 2)
 
-        cursor.execute("SELECT group_id, name FROM group_forums WHERE id = ?", (to_forum_id,))
+        cursor.execute(
+            "SELECT gf.group_id, gf.name, g.name AS group_name "
+            "FROM group_forums gf LEFT JOIN groups g ON g.id = gf.group_id "
+            "WHERE gf.id = ?",
+            (to_forum_id,))
         dest = cursor.fetchone()
         if not dest:
             conn.close()
             return {"success": False, "error": "Destination forum not found"}
         dest_group = self._row_get(dest, 'group_id')
         dest_name = self._row_get(dest, 'name', 1)
+        dest_group_name = self._row_get(dest, 'group_name', 2)
 
         src_group = None
+        src_name = None
         if from_forum_id is not None:
-            cursor.execute("SELECT group_id FROM group_forums WHERE id = ?", (from_forum_id,))
+            cursor.execute("SELECT group_id, name FROM group_forums WHERE id = ?", (from_forum_id,))
             srow = cursor.fetchone()
-            src_group = self._row_get(srow, 'group_id') if srow else None
+            if srow:
+                src_group = self._row_get(srow, 'group_id')
+                src_name = self._row_get(srow, 'name', 1)
 
         # The requester must moderate the SOURCE group (or be admin).
         if src_group is not None and not self.is_group_moderator(src_group, requested_by):
@@ -3957,16 +4290,34 @@ class Database:
 
         now = datetime.now().isoformat()
         same_group = (src_group is not None and src_group == dest_group)
-        if same_group:
+        # Owning or moderating the destination is the same authority the
+        # approval step would have asked for, so there is nobody left to ask.
+        moderates_destination = self.is_group_moderator(dest_group, requested_by)
+
+        common = {
+            "topic_id": topic_id,
+            "title": topic_title,
+            "author_id": topic_author,
+            "from_forum_id": from_forum_id,
+            "from_forum_name": src_name,
+            "from_group_id": src_group,
+            "to_forum_id": to_forum_id,
+            "to_forum_name": dest_name,
+            "to_group_id": dest_group,
+            "to_group_name": dest_group_name,
+        }
+
+        if same_group or moderates_destination:
             cursor.execute(
                 "UPDATE forum_topics SET forum_id = ?, category = ?, updated_at = ? WHERE id = ?",
                 (to_forum_id, dest_name, now, topic_id),
             )
             conn.commit()
             conn.close()
-            return {"success": True, "status": "moved"}
+            return {"success": True, "status": "moved", "cross_group": not same_group, **common}
 
-        # Cross-group: create a pending request for the target group's mods.
+        # Cross-group into a group the requester does not moderate: the target
+        # group's moderators decide.
         cursor.execute(
             "INSERT INTO forum_topic_move_requests "
             "(topic_id, from_forum_id, to_forum_id, requested_by, status, created_at) "
@@ -3976,7 +4327,38 @@ class Database:
         req_id = cursor.lastrowid
         conn.commit()
         conn.close()
-        return {"success": True, "status": "pending", "request_id": req_id}
+        return {"success": True, "status": "pending", "request_id": req_id,
+                "cross_group": True, **common}
+
+    def list_group_moderator_ids(self, group_id: int) -> List[int]:
+        """User ids that can moderate ``group_id`` (owner + moderators).
+
+        Used to tell those people that something is waiting for them - a
+        pending move request used to sit in the table with nobody informed.
+        """
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        ids = []
+        try:
+            cursor.execute("SELECT owner_id FROM groups WHERE id = ?", (group_id,))
+            row = cursor.fetchone()
+            if row:
+                owner_id = self._row_get(row, 'owner_id')
+                if owner_id is not None:
+                    ids.append(int(owner_id))
+
+            cursor.execute(
+                "SELECT user_id FROM group_members "
+                "WHERE group_id = ? AND role IN ('owner', 'moderator') AND status = 'active'",
+                (group_id,),
+            )
+            for row in cursor.fetchall():
+                user_id = self._row_get(row, 'user_id')
+                if user_id is not None and int(user_id) not in ids:
+                    ids.append(int(user_id))
+        finally:
+            conn.close()
+        return ids
 
     @_serialized_write
     def approve_topic_move(self, request_id: int, approver_id: int) -> Dict[str, Any]:
@@ -4279,6 +4661,63 @@ class Database:
         conn.close()
         return {"success": True, "status": new_status}
 
+    @_serialized_write
+    def set_extension_active(self, extension_id: int, reviewer_id: int, active: bool) -> Dict[str, Any]:
+        """Enable/disable an already-reviewed extension. Staff only. Disabling an
+        active extension takes it offline network-wide (status 'disabled') so no
+        client downloads/runs it anymore; enabling restores it to 'active'.
+        Unlike review_extension this deliberately allows the ORIGINAL author to
+        toggle their own extension too, so moderation of live add-ons isn't
+        blocked by the two-person rule."""
+        if not self._is_staff(reviewer_id):
+            return {"success": False, "error": "Only moderators can manage extensions"}
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT status FROM extensions WHERE id = ?", (extension_id,))
+        ext = cursor.fetchone()
+        if not ext:
+            conn.close()
+            return {"success": False, "error": "Extension not found"}
+        current = self._row_get(ext, 'status', 0)
+        if current not in ('active', 'disabled'):
+            conn.close()
+            return {"success": False, "error": "Only reviewed extensions can be enabled or disabled"}
+        new_status = 'active' if active else 'disabled'
+        now = datetime.now().isoformat()
+        cursor.execute("UPDATE extensions SET status = ?, updated_at = ? WHERE id = ?",
+                       (new_status, now, extension_id))
+        cursor.execute(
+            "INSERT INTO extension_reviews (extension_id, reviewer_id, decision, note, reviewed_at) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (extension_id, reviewer_id, 'enabled' if active else 'disabled', None, now),
+        )
+        conn.commit()
+        conn.close()
+        return {"success": True, "status": new_status}
+
+    @_serialized_write
+    def delete_extension(self, extension_id: int, reviewer_id: int) -> Dict[str, Any]:
+        """Permanently remove an extension and its review trail / storage / assets.
+        Staff only. Used to take a live moderator component off the network for good."""
+        if not self._is_staff(reviewer_id):
+            return {"success": False, "error": "Only moderators can delete extensions"}
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT id FROM extensions WHERE id = ?", (extension_id,))
+        if not cursor.fetchone():
+            conn.close()
+            return {"success": False, "error": "Extension not found"}
+        cursor.execute("DELETE FROM extension_reviews WHERE extension_id = ?", (extension_id,))
+        cursor.execute("DELETE FROM extension_storage WHERE extension_id = ?", (extension_id,))
+        try:
+            cursor.execute("DELETE FROM extension_assets WHERE extension_id = ?", (extension_id,))
+        except sqlite3.OperationalError:
+            pass  # assets table may not exist on older DBs
+        cursor.execute("DELETE FROM extensions WHERE id = ?", (extension_id,))
+        conn.commit()
+        conn.close()
+        return {"success": True}
+
     def get_active_extension_client(self, slug: str) -> Optional[Dict[str, Any]]:
         """Return the downloadable payload for an ACTIVE extension: for a
         'single' extension the client_code; for a 'folder' extension the base64
@@ -4440,9 +4879,25 @@ class Database:
         return self.get_user_role(user_id) == 'developer'
 
     def is_moderator(self, user_id: int) -> bool:
-        """Check if user is a moderator or developer"""
-        role = self.get_user_role(user_id)
-        return role in ('moderator', 'developer')
+        """Check if user holds a staff role: moderator, developer or admin.
+
+        'admin' used to be missing here even though ``register_user`` gives the
+        first account exactly that role, and the desktop client decides whether
+        to OFFER moderator actions from ``is_admin``. The two disagreed, so an
+        admin saw the Delete button in the Feedback Hub, confirmed the dialog,
+        and the server answered "Permission denied" - the entry simply stayed.
+        The legacy ``is_admin`` column is honoured too, for accounts created
+        before roles existed.
+        """
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT role, is_admin FROM users WHERE id = ?", (user_id,))
+        row = cursor.fetchone()
+        conn.close()
+        if not row:
+            return False
+        role = row['role'] or 'user'
+        return role in ('moderator', 'developer', 'admin') or bool(row['is_admin'])
 
     @_serialized_write
     def promote_to_moderator(self, user_id: int, appointed_by: int, title: str = "Moderator") -> Dict[str, Any]:
@@ -5506,6 +5961,231 @@ class Database:
             "title": row['title'],
             "attachment_path": row['attachment_path'],
         }
+
+    # =====================================================================
+    # REMOTE UI (server-defined screens)
+    # =====================================================================
+    # Screens are declarative JSON, never code. The server owns them, every
+    # client renders them with the same generic renderer, so adding a dialog
+    # to Titan-Net never means shipping a new Titan build.
+    REMOTE_SCREEN_AUDIENCES = ('everyone', 'moderators', 'admins')
+
+    def _remote_screen_visible(self, row: Dict[str, Any], viewer_role: str,
+                               viewer_is_admin: bool) -> bool:
+        audience = (row.get('audience') or 'everyone').lower()
+        if audience == 'everyone':
+            return True
+        if audience == 'admins':
+            return viewer_is_admin or viewer_role == 'developer'
+        if audience == 'moderators':
+            return (viewer_is_admin
+                    or viewer_role in ('moderator', 'developer', 'admin'))
+        return False
+
+    @_serialized_write
+    def save_remote_screen(self, slug: str, title: str, definition: str,
+                           created_by: int, handler: str = 'store',
+                           audience: str = 'everyone', in_menu: bool = True,
+                           active: bool = True) -> Dict[str, Any]:
+        """Create or replace a remote screen. Bumps ``version`` on update so
+        clients can tell a cached definition is stale."""
+        slug = (slug or '').strip().lower()
+        if not re.match(r'^[a-z0-9][a-z0-9_-]{1,63}$', slug):
+            return {"success": False, "error": "Invalid slug"}
+        if not (title or '').strip():
+            return {"success": False, "error": "Title is required"}
+        if audience not in self.REMOTE_SCREEN_AUDIENCES:
+            return {"success": False, "error": "Invalid audience"}
+
+        now = datetime.now().isoformat()
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT id, version FROM remote_screens WHERE slug = ?", (slug,))
+        row = cursor.fetchone()
+        if row:
+            version = int(row['version'] or 1) + 1
+            cursor.execute("""
+                UPDATE remote_screens
+                   SET title = ?, definition = ?, handler = ?, audience = ?,
+                       in_menu = ?, active = ?, version = ?, updated_at = ?
+                 WHERE id = ?
+            """, (title.strip(), definition, handler or 'store', audience,
+                  1 if in_menu else 0, 1 if active else 0, version, now, row['id']))
+            screen_id = row['id']
+        else:
+            version = 1
+            cursor.execute("""
+                INSERT INTO remote_screens
+                    (slug, title, definition, handler, audience, in_menu,
+                     active, version, created_by, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (slug, title.strip(), definition, handler or 'store', audience,
+                  1 if in_menu else 0, 1 if active else 0, version,
+                  created_by, now, now))
+            screen_id = cursor.lastrowid
+        conn.commit()
+        conn.close()
+        return {"success": True, "screen_id": screen_id, "slug": slug,
+                "version": version}
+
+    def get_remote_screen(self, slug: str) -> Optional[Dict[str, Any]]:
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM remote_screens WHERE slug = ?", ((slug or '').lower(),))
+        row = cursor.fetchone()
+        conn.close()
+        return dict(row) if row else None
+
+    def list_remote_screens(self, viewer_id: Optional[int] = None,
+                            include_inactive: bool = False) -> List[Dict[str, Any]]:
+        """Screens the viewer is allowed to see, newest first.
+
+        Only metadata - the full definition is fetched when a screen opens,
+        so a menu listing stays small even with many screens."""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        where = "" if include_inactive else "WHERE active = 1"
+        cursor.execute(f"""
+            SELECT id, slug, title, handler, audience, in_menu, active, version,
+                   created_by, created_at, updated_at
+            FROM remote_screens {where} ORDER BY title COLLATE NOCASE ASC
+        """)
+        rows = [dict(r) for r in cursor.fetchall()]
+        conn.close()
+
+        viewer_role, viewer_is_admin = 'user', False
+        if viewer_id:
+            user = self.get_user_by_id(viewer_id) or {}
+            viewer_role = user.get('role') or 'user'
+            viewer_is_admin = bool(user.get('is_admin'))
+        return [r for r in rows
+                if self._remote_screen_visible(r, viewer_role, viewer_is_admin)]
+
+    def can_view_remote_screen(self, slug: str, viewer_id: int) -> bool:
+        row = self.get_remote_screen(slug)
+        if not row or not row.get('active'):
+            return False
+        user = self.get_user_by_id(viewer_id) or {}
+        return self._remote_screen_visible(row, user.get('role') or 'user',
+                                           bool(user.get('is_admin')))
+
+    @_serialized_write
+    def delete_remote_screen(self, slug: str) -> Dict[str, Any]:
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM remote_screens WHERE slug = ?", ((slug or '').lower(),))
+        deleted = cursor.rowcount
+        conn.commit()
+        conn.close()
+        if not deleted:
+            return {"success": False, "error": "Screen not found"}
+        return {"success": True, "slug": slug}
+
+    @_serialized_write
+    def record_remote_submission(self, slug: str, user_id: int, action: str,
+                                 payload: str) -> Dict[str, Any]:
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute("""
+            INSERT INTO remote_screen_submissions (slug, user_id, action, payload, created_at)
+            VALUES (?, ?, ?, ?, ?)
+        """, (slug, user_id, action, payload, datetime.now().isoformat()))
+        submission_id = cursor.lastrowid
+        conn.commit()
+        conn.close()
+        return {"success": True, "submission_id": submission_id}
+
+    def list_remote_submissions(self, slug: str, limit: int = 200) -> List[Dict[str, Any]]:
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT s.*, u.username
+            FROM remote_screen_submissions s
+            JOIN users u ON s.user_id = u.id
+            WHERE s.slug = ? ORDER BY s.created_at DESC LIMIT ?
+        """, (slug, limit))
+        rows = [dict(r) for r in cursor.fetchall()]
+        conn.close()
+        return rows
+
+    # =====================================================================
+    # SERVER SOUNDS
+    # =====================================================================
+    SERVER_SOUND_DIR = 'server_sounds'
+    SERVER_SOUND_MAX_BYTES = 5 * 1024 * 1024
+    SERVER_SOUND_EXTENSIONS = ('.ogg', '.wav', '.mp3', '.opus', '.flac')
+
+    @_serialized_write
+    def add_server_sound(self, name: str, filename: str, sha256: str, size: int,
+                         uploaded_by: int, mime: Optional[str] = None,
+                         description: Optional[str] = None) -> Dict[str, Any]:
+        """Register an already-written sound file. Re-uploading the same name
+        replaces the metadata (the caller replaces the file on disk)."""
+        name = (name or '').strip().lower()
+        if not re.match(r'^[a-z0-9][a-z0-9_.-]{0,63}$', name):
+            return {"success": False, "error": "Invalid sound name"}
+        now = datetime.now().isoformat()
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT id, filename FROM server_sounds WHERE name = ?", (name,))
+        row = cursor.fetchone()
+        old_filename = row['filename'] if row else None
+        if row:
+            cursor.execute("""
+                UPDATE server_sounds
+                   SET filename = ?, sha256 = ?, size = ?, mime = ?,
+                       description = ?, uploaded_by = ?, created_at = ?
+                 WHERE id = ?
+            """, (filename, sha256, size, mime, description, uploaded_by, now, row['id']))
+            sound_id = row['id']
+        else:
+            cursor.execute("""
+                INSERT INTO server_sounds
+                    (name, description, filename, mime, size, sha256, uploaded_by, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """, (name, description, filename, mime, size, sha256, uploaded_by, now))
+            sound_id = cursor.lastrowid
+        conn.commit()
+        conn.close()
+        return {"success": True, "sound_id": sound_id, "name": name,
+                "sha256": sha256, "replaced": old_filename}
+
+    def get_server_sound(self, name: str) -> Optional[Dict[str, Any]]:
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM server_sounds WHERE name = ?", ((name or '').lower(),))
+        row = cursor.fetchone()
+        conn.close()
+        return dict(row) if row else None
+
+    def list_server_sounds(self) -> List[Dict[str, Any]]:
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT s.id, s.name, s.description, s.mime, s.size, s.sha256,
+                   s.created_at, u.username AS uploaded_by_username
+            FROM server_sounds s
+            LEFT JOIN users u ON s.uploaded_by = u.id
+            ORDER BY s.name ASC
+        """)
+        rows = [dict(r) for r in cursor.fetchall()]
+        conn.close()
+        return rows
+
+    @_serialized_write
+    def delete_server_sound(self, name: str) -> Dict[str, Any]:
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT filename FROM server_sounds WHERE name = ?", ((name or '').lower(),))
+        row = cursor.fetchone()
+        if not row:
+            conn.close()
+            return {"success": False, "error": "Sound not found"}
+        filename = row['filename']
+        cursor.execute("DELETE FROM server_sounds WHERE name = ?", ((name or '').lower(),))
+        conn.commit()
+        conn.close()
+        return {"success": True, "name": name, "filename": filename}
 
     # =====================================================================
     # INTERACTIVE GAMES (Entertainment tab)

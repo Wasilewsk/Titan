@@ -18,7 +18,7 @@ from src.titan_core.app_manager import get_applications, open_application
 from src.titan_core.game_manager import get_games, open_game
 from src.system.notifications import get_current_time, get_battery_status, get_volume_level, get_network_status
 from src.titan_core.statusbar_applet_manager import StatusbarAppletManager
-from src.titan_core.sound import initialize_sound, play_focus_sound, play_select_sound, play_statusbar_sound, play_applist_sound, play_endoflist_sound, play_sound
+from src.titan_core.sound import initialize_sound, play_focus_sound, play_select_sound, play_statusbar_sound, play_applist_sound, play_endoflist_sound, play_sound, play_shutdown_sound
 import accessible_output3.outputs.auto
 from src.ui.menu import MenuBar
 from src.ui.invisibleui import InvisibleUI
@@ -643,6 +643,32 @@ class TitanApp(wx.Frame):
         # Release the startup sound guard shortly after initial paint so any
         # subsequent user-driven focus/list-item sounds play normally.
         wx.CallLater(800, self._end_startup_sound_guard)
+
+        # Register the voice-assistant global hotkeys (best effort; no-op unless
+        # AI features are enabled and a shortcut is configured).
+        wx.CallLater(1200, self._register_assistant_hotkeys)
+
+    def _register_assistant_hotkeys(self):
+        try:
+            from src.ai.assistant import hotkeys as _assistant_hotkeys
+            _assistant_hotkeys.register()
+        except Exception as e:
+            print(f"[gui] assistant hotkey registration failed: {e}")
+        # The AI OCR shortcuts (global and Titan-UI). Registered next to the
+        # assistant's because they are the same kind of thing and share the
+        # same "nothing happens unless it is configured" behaviour.
+        try:
+            from src.ai.ocr import hotkeys as _ocr_hotkeys
+            _ocr_hotkeys.register()
+        except Exception as e:
+            print(f"[gui] AI OCR hotkey registration failed: {e}")
+        # Automatic announcements of due tReminder reminders (no-op when the
+        # feature is switched off in Settings, AI features).
+        try:
+            from src.ai.assistant import reminder_watcher
+            reminder_watcher.start()
+        except Exception as e:
+            print(f"[gui] reminder announcer could not start: {e}")
 
     def _end_startup_sound_guard(self):
         self._startup_sound_guard = False
@@ -3146,6 +3172,17 @@ class TitanApp(wx.Frame):
 
         print(f"[GUI] Registered view '{view_id}' at position {insert_idx} (total views: {len(self.registered_views)})")
 
+    def rebuild_menu_bar(self):
+        """Recreate the menu bar so context-dependent menus (e.g. the Programmer
+        menu, gated on the developer-tools / AI-features settings) appear or
+        disappear without an app restart. Called after settings are saved."""
+        try:
+            from src.ui.menu import MenuBar
+            self.SetMenuBar(MenuBar(self))
+            print("[GUI] Menu bar rebuilt")
+        except Exception as e:
+            print(f"[GUI] Error rebuilding menu bar: {e}")
+
     def _auto_sync_tab_bar_on_focus(self, event, control):
         """Re-inject the virtual tab bar row whenever focus lands on a
         registered view's control. This fixes the case where component code
@@ -3414,40 +3451,36 @@ class TitanApp(wx.Frame):
             )
         
     def show_messenger_login(self):
-        """Show Facebook Messenger WebView interface"""
+        """Open the accessible Messenger client (messenger.com runs offscreen)."""
         try:
-            messenger_window = messenger_webview.show_messenger_webview(self)
+            from src.network.messenger_titan_gui import show_messenger_client
+            messenger_window = show_messenger_client(self)
             if messenger_window:
                 register_window("Messenger", window=messenger_window, category='messenger')
-                # Add Messenger to active services when successfully connected
-                # This will be handled by callback from messenger_window
-                self.setup_messenger_callbacks(messenger_window)
         except Exception as e:
-            print(f"WebView Messenger error: {e}")
+            print(f"Messenger client error: {e}")
             _show_skinned_message(
-                _("Cannot launch Messenger WebView.\n"
+                _("Cannot launch Messenger.\n"
                   "Check if WebView2 is installed."),
-                _("Messenger WebView Error"),
+                _("Messenger Error"),
                 wx.OK | wx.ICON_ERROR
             )
-    
+
     def show_whatsapp_login(self):
-        """Show WhatsApp WebView interface"""
+        """Open the accessible WhatsApp client (WhatsApp Web runs offscreen)."""
         try:
-            whatsapp_window = whatsapp_webview.show_whatsapp_webview(self)
+            from src.network.whatsapp_titan_gui import show_whatsapp_client
+            whatsapp_window = show_whatsapp_client(self)
             if whatsapp_window:
                 register_window("WhatsApp", window=whatsapp_window, category='messenger')
-                # Add WhatsApp to active services when successfully connected
-                # This will be handled by callback from whatsapp_window
-                self.setup_whatsapp_callbacks(whatsapp_window)
         except Exception as e:
-            print(f"WebView WhatsApp error: {e}")
+            print(f"WhatsApp client error: {e}")
             # Only show MessageBox if we have a running wx.App
             if wx.GetApp():
                 _show_skinned_message(
-                    _("Cannot launch WhatsApp WebView.\n"
+                    _("Cannot launch WhatsApp.\n"
                       "Check if WebView2 is installed."),
-                    _("WhatsApp WebView Error"),
+                    _("WhatsApp Error"),
                     wx.OK | wx.ICON_ERROR
                 )
         
@@ -3816,31 +3849,22 @@ class TitanApp(wx.Frame):
         client.on_user_offline = on_user_offline
 
     def open_messenger_webview(self):
-        """Open Messenger WebView window"""
+        """Open the accessible Messenger client (kept name: old callers use it)."""
         try:
             if "messenger" in self.active_services:
-                # If already have a messenger service, try to show existing window
-                messenger_instance = self.active_services["messenger"]["client"]
+                # Already running - raise the existing client window.
+                messenger_instance = self.active_services["messenger"].get("window") or \
+                    self.active_services["messenger"].get("client")
                 if hasattr(messenger_instance, 'Show'):
                     messenger_instance.Show()
                     messenger_instance.Raise()
                     return
-            
-            # Open new Messenger WebView
-            import messenger_webview
-            messenger_window = messenger_webview.show_messenger_webview(self)
-            if messenger_window:
-                register_window("Messenger", window=messenger_window, category='messenger')
-                self.setup_messenger_callbacks(messenger_window)
-                _show_skinned_message(
-                    _("Messenger WebView opened.\nPlease log in to see your contacts in Titan IM."),
-                    _("Messenger WebView"),
-                    wx.OK | wx.ICON_INFORMATION
-                )
+
+            self.show_messenger_login()
         except Exception as e:
-            print(f"Error opening Messenger WebView: {e}")
+            print(f"Error opening the Messenger client: {e}")
             _show_skinned_message(
-                _("Failed to open Messenger WebView.\nCheck if WebView2 is installed."),
+                _("Failed to open Messenger.\nCheck if WebView2 is installed."),
                 _("Error"),
                 wx.OK | wx.ICON_ERROR
             )
@@ -4766,6 +4790,15 @@ class TitanApp(wx.Frame):
         # Safely disconnect from Telegram if connected
         def safe_shutdown():
             try:
+                # Quick start skips the shutdown sound/delay, same as it skips
+                # the startup sound/delay in main.py.
+                try:
+                    quick_start = str(get_setting('quick_start', 'False')).lower() in ('true', '1')
+                except Exception:
+                    quick_start = False
+                if not quick_start:
+                    play_shutdown_sound()
+
                 # Stop status update thread immediately
                 print("INFO: Stopping status update thread...")
                 self.status_thread_running = False
@@ -5095,8 +5128,22 @@ class TitanApp(wx.Frame):
         play_sound('ui/dialog.ogg')
         message = _("Do you want to start a voice call with {}?").format(username)
         result = _show_skinned_message(message, _("Voice call"), wx.YES_NO | wx.ICON_QUESTION)
-        
-        if result == wx.YES:
+
+        # _show_skinned_message returns MessageDialog.ShowModal(), i.e. wx.ID_YES
+        # / wx.ID_NO - NOT the wx.YES / wx.NO that wx.MessageBox returns.
+        if result == wx.ID_YES:
+            # Windows shows no consent prompt for desktop apps, so a blocked
+            # microphone otherwise produces a call the other side cannot hear.
+            # Check here, on the main thread, where we can offer the settings page.
+            try:
+                from src.system.mic_permission import ensure_microphone_access
+                if not ensure_microphone_access(parent=self):
+                    play_sound('core/error.ogg')
+                    play_sound('ui/dialogclose.ogg')
+                    return
+            except Exception as mic_err:
+                print(f"[GUI] microphone check unavailable: {mic_err}")
+
             # Start voice call
             success = telegram_client.start_voice_call(username)
             if success:
@@ -5192,7 +5239,7 @@ class TitanApp(wx.Frame):
             
             if with_user == self.current_chat_user and self.current_list == "messages":
                 self.chat_display.Clear()
-                self.chat_display.AppendText(f"--- Historia rozmowy z {with_user} ---\n\n")
+                self.chat_display.AppendText(_("--- Chat history with %s ---") % with_user + "\n\n")
                 
                 for msg in messages:
                     timestamp = msg.get('timestamp', '')
@@ -5210,7 +5257,7 @@ class TitanApp(wx.Frame):
                     message = msg.get('message', '')
                     self.chat_display.AppendText(f"[{time_str}] {sender}: {message}\n")
                 
-                self.chat_display.AppendText("\n--- Koniec historii ---\n\n")
+                self.chat_display.AppendText("\n" + _("--- End of history ---") + "\n\n")
                 self.chat_display.SetInsertionPointEnd()
         
         elif msg_type == 'message_sent':

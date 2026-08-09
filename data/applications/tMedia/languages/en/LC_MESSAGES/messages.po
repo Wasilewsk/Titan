@@ -1,37 +1,536 @@
-# English translations for PROJECT.
+# English translations for TMedia.
 # Copyright (C) 2025 ORGANIZATION
 # This file is distributed under the same license as the PROJECT project.
-# FIRST AUTHOR <EMAIL@ADDRESS>, 2025.
 #
 msgid ""
 msgstr ""
-"Project-Id-Version: PROJECT VERSION\n"
-"Report-Msgid-Bugs-To: EMAIL@ADDRESS\n"
-"POT-Creation-Date: 2025-07-12 15:07+0200\n"
-"PO-Revision-Date: 2025-07-12 15:07+0200\n"
-"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Project-Id-Version: TMedia 1.0\n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-07-10 12:00+0200\n"
+"PO-Revision-Date: 2026-07-10 12:00+0200\n"
+"Last-Translator: \n"
 "Language: en\n"
-"Language-Team: en <LL@li.org>\n"
+"Language-Team: en\n"
 "Plural-Forms: nplurals=2; plural=(n != 1);\n"
 "MIME-Version: 1.0\n"
 "Content-Type: text/plain; charset=utf-8\n"
 "Content-Transfer-Encoding: 8bit\n"
-"Generated-By: Babel 2.17.0\n"
 
-#: YoutubeSearch.py:14
-msgid "Wyszukiwarka YouTube"
+#: MediaCatalog.py
+msgid "Select Radio Language"
 msgstr ""
 
-#: YoutubeSearch.py:23
-msgid "Szukaj"
+#: MediaCatalog.py
+msgid "Loading available languages..."
 msgstr ""
 
-#: YoutubeSearch.py:65
-msgid "Wyniki zostały załadowane"
-msgstr ""
-
-#: YoutubeSearch.py:67
+#: MediaCatalog.py
 #, python-format
-msgid "Błąd podczas wyszukiwania: %s"
+msgid "stations"
 msgstr ""
 
+#: MediaCatalog.py
+#, python-format
+msgid "Failed to load languages (HTTP %d)"
+msgstr ""
+
+#: MediaCatalog.py
+#, python-format
+msgid "Network error: %s"
+msgstr ""
+
+#: MediaCatalog.py
+msgid "Select a language and press OK"
+msgstr ""
+
+#: MediaCatalog.py
+msgid "Media Catalog"
+msgstr ""
+
+#: MediaCatalog.py
+msgid "Radio Stations"
+msgstr ""
+
+#: MediaCatalog.py
+msgid "Podcasts"
+msgstr ""
+
+#: MediaCatalog.py
+msgid "Media Library"
+msgstr ""
+
+#: MediaCatalog.py
+#, python-format
+msgid "Error loading radio stations (%s): %s"
+msgstr ""
+
+#: MediaCatalog.py
+#, python-format
+msgid "Error loading podcasts from %s: %s"
+msgstr ""
+
+#: MediaCatalog.py
+#, python-format
+msgid "Podcast file not found: %s"
+msgstr ""
+
+#: MediaCatalog.py
+#, python-format
+msgid "Error loading URL catalogs from %s: %s"
+msgstr ""
+
+#: MediaCatalog.py
+#, python-format
+msgid "URL catalog file not found: %s"
+msgstr ""
+
+#: MediaCatalog.py
+#, python-format
+msgid "Error parsing RSS feed for %s: %s"
+msgstr ""
+
+#: MediaCatalog.py
+#, python-format
+msgid "Error loading podcast episodes from %s: %s"
+msgstr ""
+
+#: MediaCatalog.py
+#, python-format
+msgid "Connection error loading catalog %s: %s"
+msgstr ""
+
+#: MediaCatalog.py
+#, python-format
+msgid "Error loading catalog %s: %s"
+msgstr ""
+
+#: MediaCatalog.py
+#, python-format
+msgid "Playing: %s"
+msgstr ""
+
+#: MediaCatalog.py
+#, python-format
+msgid "Player: %s"
+msgstr ""
+
+#: MediaCatalog.py
+msgid "Loading Error"
+msgstr ""
+
+#: player.py
+msgid "Player"
+msgstr ""
+
+#: player.py
+msgid "Paused"
+msgstr ""
+
+#: player.py
+msgid "Streaming"
+msgstr ""
+
+#: player.py
+msgid "Playing: "
+msgstr ""
+
+#: player.py
+msgid "Stream loaded"
+msgstr ""
+
+#: player.py
+msgid "Playing"
+msgstr ""
+
+#: player.py
+msgid "Pause"
+msgstr ""
+
+#: player.py
+msgid "Volume down"
+msgstr ""
+
+#: player.py
+msgid "Volume up"
+msgstr ""
+
+#: player.py
+msgid "Rewind 10s"
+msgstr ""
+
+#: player.py
+msgid "Rewind 10 seconds"
+msgstr ""
+
+#: player.py
+msgid "Forward 10s"
+msgstr ""
+
+#: player.py
+msgid "Forward 10 seconds"
+msgstr ""
+
+#: player.py
+#, python-format
+msgid "Volume: %d%%"
+msgstr ""
+
+#: player.py
+#, python-format
+msgid "Volume: %d percent"
+msgstr ""
+
+#: player.py
+msgid "Player closed"
+msgstr ""
+
+#: Settings.py
+msgid "Settings"
+msgstr ""
+
+#: Settings.py
+msgid "Sound feedback"
+msgstr ""
+
+#: Settings.py
+msgid "Speech output"
+msgstr ""
+
+#: Settings.py
+msgid "Built-in player"
+msgstr ""
+
+#: Settings.py
+msgid "Save"
+msgstr ""
+
+#: Settings.py
+msgid "Cancel"
+msgstr ""
+
+#: tmedia.py
+msgid "Back"
+msgstr ""
+
+#: tmedia.py
+msgid "Settings..."
+msgstr ""
+
+#: tmedia.py
+msgid "&Application"
+msgstr ""
+
+#: tmedia.py
+msgid "Loading media catalog"
+msgstr ""
+
+#: tmedia.py
+msgid "TMedia functions"
+msgstr ""
+
+#: YoutubeSearch.py
+msgid "YouTube Search"
+msgstr ""
+
+#: YoutubeSearch.py
+msgid "Search"
+msgstr ""
+
+#: YoutubeSearch.py
+#, python-format
+msgid "Found %d cached results for: %s"
+msgstr ""
+
+#: YoutubeSearch.py
+msgid "No cached results found"
+msgstr ""
+
+#: YoutubeSearch.py
+#, python-format
+msgid "Found %d results for: %s"
+msgstr ""
+
+#: YoutubeSearch.py
+#, python-format
+msgid "No results found for: %s"
+msgstr ""
+
+#: YoutubeSearch.py
+msgid "Network connection error. Check your internet connection."
+msgstr ""
+
+#: YoutubeSearch.py
+msgid "Search timed out. Please try again."
+msgstr ""
+
+#: YoutubeSearch.py
+#, python-format
+msgid "Search error: %s"
+msgstr ""
+
+#: YoutubeSearch.py
+msgid "Play"
+msgstr ""
+
+#: YoutubeSearch.py
+msgid "Open in Browser"
+msgstr ""
+
+#: YoutubeSearch.py
+msgid "No valid video found"
+msgstr ""
+
+#: YoutubeSearch.py
+#, python-format
+msgid "Extracting stream for: %s"
+msgstr ""
+
+#: YoutubeSearch.py
+msgid "Failed to extract video info"
+msgstr ""
+
+#: YoutubeSearch.py
+msgid "No playable stream found"
+msgstr ""
+
+#: YoutubeSearch.py
+#, python-format
+msgid "Playback error: %s"
+msgstr ""
+
+#: YoutubeSearch.py
+#, python-format
+msgid "Playing: %s"
+msgstr ""
+
+#: YoutubeSearch.py
+msgid "No valid video URL found"
+msgstr ""
+
+#: player.py
+msgid "Previous track"
+msgstr ""
+
+#: player.py
+msgid "Next track"
+msgstr ""
+
+#: player.py
+msgid "Add bookmark"
+msgstr ""
+
+#: player.py
+msgid "Bookmarks..."
+msgstr ""
+
+#: player.py
+msgid "Go to position..."
+msgstr ""
+
+#: player.py
+msgid "Nothing to play"
+msgstr ""
+
+#: player.py
+msgid "Resuming from %s"
+msgstr ""
+
+#: player.py
+msgid "Starting at %s"
+msgstr ""
+
+#: player.py
+msgid "%(book)s - track %(number)d of %(total)d: %(title)s"
+msgstr ""
+
+#: player.py
+msgid "Track %(number)d of %(total)d: %(title)s"
+msgstr ""
+
+#: player.py
+msgid "Last track"
+msgstr ""
+
+#: player.py
+msgid "First track"
+msgstr ""
+
+#: player.py
+msgid "Starting from the beginning"
+msgstr ""
+
+#: player.py
+msgid "Jumped to %s"
+msgstr ""
+
+#: player.py
+msgid "Going to %s"
+msgstr ""
+
+#: player.py
+msgid "Bookmark %s"
+msgstr ""
+
+#: player.py
+msgid "Bookmark added at %s"
+msgstr ""
+
+#: player.py
+msgid "Finished"
+msgstr ""
+
+#: player.py
+msgid "Go to position"
+msgstr ""
+
+#: player.py
+msgid "Position (for example 50%, 49 minutes, 1:23:45)"
+msgstr ""
+
+#: player.py
+msgid "I did not understand that position"
+msgstr ""
+
+#: player.py
+msgid "Space play or pause. Left and right arrows seek ten seconds. Up and down arrows change volume. Control plus left or right changes track. Control plus B adds a bookmark, control plus shift plus B adds a named bookmark, B opens the bookmark list. G goes to any position, such as 50 percent or 49 minutes. Control plus home starts from the beginning. Escape closes the player."
+msgstr ""
+
+#: bookmarks_gui.py
+msgid "Track %(number)d of %(total)d"
+msgstr ""
+
+#: bookmarks_gui.py
+msgid "Track %d"
+msgstr ""
+
+#: bookmarks_gui.py
+msgid "Bookmarks: %s"
+msgstr ""
+
+#: bookmarks_gui.py
+msgid "Bookmarks"
+msgstr ""
+
+#: bookmarks_gui.py
+msgid "Go to"
+msgstr ""
+
+#: bookmarks_gui.py
+msgid "Add here"
+msgstr ""
+
+#: bookmarks_gui.py
+msgid "Rename"
+msgstr ""
+
+#: bookmarks_gui.py
+msgid "Delete"
+msgstr ""
+
+#: bookmarks_gui.py
+msgid "Close"
+msgstr ""
+
+#: bookmarks_gui.py
+msgid "Resume point - %s"
+msgstr ""
+
+#: bookmarks_gui.py
+msgid "Bookmark"
+msgstr ""
+
+#: bookmarks_gui.py
+msgid "No bookmarks yet"
+msgstr ""
+
+#: bookmarks_gui.py
+msgid "Bookmark name"
+msgstr ""
+
+#: bookmarks_gui.py
+msgid "Bookmark added"
+msgstr ""
+
+#: bookmarks_gui.py
+msgid "The resume point cannot be renamed"
+msgstr ""
+
+#: bookmarks_gui.py
+msgid "Rename bookmark"
+msgstr ""
+
+#: bookmarks_gui.py
+msgid "Resume point removed"
+msgstr ""
+
+#: bookmarks_gui.py
+msgid "Bookmark removed"
+msgstr ""
+
+#: bookmarks_gui.py
+msgid "Bookmarks and resume points"
+msgstr ""
+
+#: bookmarks_gui.py
+msgid "Resume"
+msgstr ""
+
+#: bookmarks_gui.py
+msgid "Forget"
+msgstr ""
+
+#: bookmarks_gui.py
+msgid "Nothing to resume yet"
+msgstr ""
+
+#: bookmarks_gui.py
+msgid "Nothing to resume yet. Positions are saved automatically while you listen."
+msgstr ""
+
+#: bookmarks_gui.py
+msgid "%d items"
+msgstr ""
+
+#: bookmarks_gui.py
+msgid "audiobook"
+msgstr ""
+
+#: bookmarks_gui.py
+msgid "%d bookmarks"
+msgstr ""
+
+#: bookmarks_gui.py
+msgid "Removed"
+msgstr ""
+
+#: tmedia.py
+msgid "Loading audiobook: %s"
+msgstr ""
+
+#: tmedia.py
+msgid "No media files in this folder"
+msgstr ""
+
+#: tmedia.py
+msgid "No media files in this folder."
+msgstr ""
+
+#: tmedia.py
+msgid "Audiobook"
+msgstr ""
+
+#: MediaCatalog.py
+msgid "Play folder as audiobook"
+msgstr ""
+
+#: MediaCatalog.py
+msgid "Play from position..."
+msgstr ""
+
+#: MediaCatalog.py
+msgid "Play from position"
+msgstr ""
+
+#: MediaCatalog.py
+msgid "Could not start VLC: %s"
+msgstr ""

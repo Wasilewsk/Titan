@@ -36,12 +36,27 @@ PyOpenAL
 
 # Voice chat dependencies
 sounddevice>=0.4.6
-webrtcvad-wheels>=2.0.14
+# webrtcvad-wheels has no Python 3.14 wheels (unmaintained since Sept 2024,
+# and its C extension will not build from sdist on 3.14 either). It is used
+# when present; otherwise src/network/vad_fallback.py provides an equivalent
+# pure-Python detector, so Voice Activation works on every Python version.
+webrtcvad-wheels>=2.0.14; python_version < "3.14"
+# Opus keeps voice rooms at ~24kbps instead of 256kbps raw PCM. The libopus
+# DLLs ship in data/lib/; without opuslib the rooms still work in PCM mode.
+opuslib>=3.0.1
 numpy>=1.24.0
 
 # AI System dependencies
-google-generativeai>=0.8.0
+# Multi-provider AI (Settings > AI features): each provider's SDK is needed only
+# when that provider is selected, but all three ship so every provider works out
+# of the box (agent tool-calling + creation kit + assistant Gemini/OpenAI TTS).
+google-genai>=1.0.0        # Google Gemini (current SDK; replaces google-generativeai)
+anthropic>=0.40.0          # Anthropic Claude
+openai>=1.40.0             # OpenAI (chat + text-to-speech)
 gtts  # Text-to-speech fallback
+# Web-browser automation for the AI agent / voice assistant (navigate pages,
+# fill in forms). Selenium 4.6+ auto-manages the browser driver.
+selenium>=4.6.0
 
 # Linux system integration (optional)
 # Note: For Linux audio control, system packages are preferred:

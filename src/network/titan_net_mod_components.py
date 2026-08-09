@@ -1021,8 +1021,13 @@ def _current_region():
 
 
 def _user_is_moderator(titan_client):
-    role = getattr(titan_client, 'user_role', 'user') if titan_client is not None else 'user'
-    return role in ('moderator', 'developer')
+    # Mirrors Database.is_moderator() server-side: admins are staff too.
+    if titan_client is None:
+        return False
+    if getattr(titan_client, 'is_admin', False):
+        return True
+    role = getattr(titan_client, 'user_role', 'user')
+    return role in ('moderator', 'developer', 'admin')
 
 
 def _component_server_slug(component):
@@ -1479,11 +1484,12 @@ def resolve_latest_model(provider, api_key):
             cand.sort(key=lambda m: getattr(m, 'created', 0), reverse=True)
             model = str(cand[0].id) if cand else None
         elif provider == 'gemini':
-            import google.generativeai as genai
-            genai.configure(api_key=api_key)
+            from google import genai
+            client = genai.Client(api_key=api_key)
             names = []
-            for m in genai.list_models():
-                methods = getattr(m, 'supported_generation_methods', []) or []
+            for m in client.models.list():
+                methods = (getattr(m, 'supported_actions', None)
+                           or getattr(m, 'supported_generation_methods', None) or [])
                 nm = getattr(m, 'name', '') or ''
                 short = nm.split('/')[-1]
                 if 'generateContent' in methods and short.startswith('gemini') \
@@ -1536,16 +1542,18 @@ def generate_component_code(conversation, api_key, provider='anthropic', model=N
         )
         text = ''.join(getattr(b, 'text', '') for b in msg.content if getattr(b, 'type', '') == 'text')
     elif provider == 'gemini':
-        import google.generativeai as genai  # may raise ImportError
-        genai.configure(api_key=api_key)
-        gmodel = genai.GenerativeModel(model, system_instruction=system)
+        from google import genai  # may raise ImportError
+        from google.genai import types
+        client = genai.Client(api_key=api_key)
         # Gemini uses 'user'/'model' roles; map the assistant turns across.
         contents = [
-            {'role': 'model' if m['role'] == 'assistant' else 'user',
-             'parts': [m['content']]}
+            types.Content(role='model' if m['role'] == 'assistant' else 'user',
+                          parts=[types.Part(text=m['content'])])
             for m in messages
         ]
-        resp = gmodel.generate_content(contents)
+        resp = client.models.generate_content(
+            model=model, contents=contents,
+            config=types.GenerateContentConfig(system_instruction=system))
         text = getattr(resp, 'text', '') or ''
     elif provider == 'openai':
         import openai  # may raise ImportError
@@ -1829,7 +1837,7 @@ class ExtensionReviewDialog(wx.Dialog):
     reject them. The server refuses if you try to approve your own."""
 
     def __init__(self, parent, titan_client):
-        super().__init__(parent, title=_("Review Network Extensions"), size=(720, 480))
+        super().__init__(parent, title=_("Moderate Network Components"), size=(760, 520))
         self.titan_client = titan_client
         self.pending = []
         self.InitUI()
@@ -1844,10 +1852,12 @@ class ExtensionReviewDialog(wx.Dialog):
         self.status = wx.StaticText(panel, label="")
         vbox.Add(self.status, flag=wx.ALL, border=8)
         self.list = wx.ListCtrl(panel, style=wx.LC_REPORT | wx.LC_SINGLE_SEL)
-        self.list.AppendColumn(_("Extension"), width=240)
-        self.list.AppendColumn(_("Author"), width=160)
-        self.list.AppendColumn(_("Version"), width=80)
+        self.list.AppendColumn(_("Component"), width=220)
+        self.list.AppendColumn(_("Author"), width=150)
+        self.list.AppendColumn(_("Version"), width=70)
+        self.list.AppendColumn(_("Status"), width=90)
         vbox.Add(self.list, proportion=1, flag=wx.EXPAND | wx.ALL, border=8)
+        # Row 1: review pending. Row 2: manage already-active components.
         btn_box = wx.BoxSizer(wx.HORIZONTAL)
         for label, handler in (
             (_("View Code"), self.OnViewCode),
@@ -1859,14 +1869,27 @@ class ExtensionReviewDialog(wx.Dialog):
             b = wx.Button(panel, label=label)
             b.Bind(wx.EVT_BUTTON, handler)
             btn_box.Add(b, flag=wx.RIGHT, border=5)
+        vbox.Add(btn_box, flag=wx.ALIGN_CENTER | wx.LEFT | wx.RIGHT | wx.TOP, border=8)
+
+        manage_box = wx.BoxSizer(wx.HORIZONTAL)
+        for label, handler in (
+            (_("Disable"), self.OnDisable),
+            (_("Enable"), self.OnEnable),
+            (_("Delete"), self.OnDelete),
+        ):
+            b = wx.Button(panel, label=label)
+            b.Bind(wx.EVT_BUTTON, handler)
+            manage_box.Add(b, flag=wx.RIGHT, border=5)
         close_btn = wx.Button(panel, wx.ID_CANCEL, _("Close"))
-        btn_box.Add(close_btn)
-        vbox.Add(btn_box, flag=wx.ALIGN_CENTER | wx.ALL, border=8)
+        manage_box.Add(close_btn)
+        vbox.Add(manage_box, flag=wx.ALIGN_CENTER | wx.ALL, border=8)
         panel.SetSizer(vbox)
 
     def reload(self):
         def _load():
-            result = self.titan_client.list_extensions(status='pending')
+            # No status filter: as staff this returns pending + active + disabled
+            # so the reviewer can both approve pending AND manage live components.
+            result = self.titan_client.list_extensions()
             wx.CallAfter(self._display, result)
         threading.Thread(target=_load, daemon=True).start()
 
@@ -1875,12 +1898,25 @@ class ExtensionReviewDialog(wx.Dialog):
         if not result.get('success'):
             self.status.SetLabel(result.get('error', _("Failed to load")))
             return
-        self.pending = result.get('extensions', [])
+        # Resolved at call time so the active locale (not import-time) applies.
+        status_labels = {
+            'pending': _("Pending"),
+            'active': _("Active"),
+            'disabled': _("Disabled"),
+            'rejected': _("Rejected"),
+        }
+        # Show pending/active/disabled; hide already-rejected clutter.
+        self.pending = [e for e in result.get('extensions', [])
+                        if e.get('status') in ('pending', 'active', 'disabled')]
         for e in self.pending:
             idx = self.list.InsertItem(self.list.GetItemCount(), e.get('name', ''))
             self.list.SetItem(idx, 1, e.get('author_username', ''))
             self.list.SetItem(idx, 2, str(e.get('version', '')))
-        self.status.SetLabel("" if self.pending else _("No pending extensions."))
+            self.list.SetItem(idx, 3, status_labels.get(e.get('status', ''), e.get('status', '')))
+        if not self.pending:
+            self.status.SetLabel(_("No components to moderate."))
+        else:
+            self.status.SetLabel(_("Approve pending components, or disable/delete active ones."))
 
     def _selected(self):
         sel = self.list.GetFirstSelected()
@@ -2035,6 +2071,52 @@ class ExtensionReviewDialog(wx.Dialog):
         else:
             play_sound('core/error.ogg')
             wx.MessageBox(result.get('error', _("Operation failed")), _("Error"), wx.OK | wx.ICON_ERROR, self)
+
+    def OnDisable(self, event):
+        """Take a live (active) component offline network-wide."""
+        ext = self._selected()
+        if not ext:
+            return
+        if ext.get('status') != 'active':
+            wx.MessageBox(_("Only active components can be disabled."),
+                          _("Disable"), wx.OK | wx.ICON_INFORMATION, self)
+            return
+        play_sound('core/SELECT.ogg')
+        def _do():
+            result = self.titan_client.disable_extension(ext['id'])
+            wx.CallAfter(self._on_reviewed, result)
+        threading.Thread(target=_do, daemon=True).start()
+
+    def OnEnable(self, event):
+        """Restore a disabled component to active."""
+        ext = self._selected()
+        if not ext:
+            return
+        if ext.get('status') != 'disabled':
+            wx.MessageBox(_("Only disabled components can be enabled."),
+                          _("Enable"), wx.OK | wx.ICON_INFORMATION, self)
+            return
+        play_sound('core/SELECT.ogg')
+        def _do():
+            result = self.titan_client.enable_extension(ext['id'])
+            wx.CallAfter(self._on_reviewed, result)
+        threading.Thread(target=_do, daemon=True).start()
+
+    def OnDelete(self, event):
+        """Permanently delete a component from the network."""
+        ext = self._selected()
+        if not ext:
+            return
+        if wx.MessageBox(
+                _("Permanently delete '{name}'? This removes it from Titan-Net for everyone "
+                  "and cannot be undone.").format(name=ext.get('name', '')),
+                _("Delete Component"), wx.YES_NO | wx.ICON_WARNING, self) != wx.YES:
+            return
+        play_sound('core/SELECT.ogg')
+        def _do():
+            result = self.titan_client.delete_extension(ext['id'])
+            wx.CallAfter(self._on_reviewed, result)
+        threading.Thread(target=_do, daemon=True).start()
 
 
 class ModeratorComponentsWindow(wx.Frame):

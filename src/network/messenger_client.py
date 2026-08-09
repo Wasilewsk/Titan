@@ -61,10 +61,10 @@ class MessengerClient:
     
     
     def open_messenger_web(self):
-        """Open Messenger in WebView (integrated with Titan IM)"""
+        """Open the accessible Messenger client (messenger.com runs offscreen)"""
         try:
-            # Use the existing WebView integration
-            messenger_window = messenger_webview.show_messenger_webview(None)
+            from src.network.messenger_titan_gui import show_messenger_client
+            messenger_window = show_messenger_client(None)
             if messenger_window:
                 return True
             else:
@@ -73,7 +73,7 @@ class MessengerClient:
                 webbrowser.open('https://www.messenger.com')
                 return True
         except Exception as e:
-            print(f"Błąd podczas otwierania Messenger: {e}")
+            print(f"Error opening Messenger: {e}")
             return False
     
     
@@ -121,7 +121,7 @@ class MessengerClient:
                 return True
             return False
         except Exception as e:
-            print(f"Błąd podczas uruchamiania Messenger: {e}")
+            print(f"Error starting Messenger: {e}")
             return False
     
     async def _websocket_handler(self):

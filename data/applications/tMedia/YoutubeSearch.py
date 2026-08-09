@@ -1,66 +1,54 @@
 import wx
 import yt_dlp
 import webbrowser
+import threading
 from translation import _
 
-try:
-    from src.titan_core.skin_manager import apply_skin_to_window
-except ImportError:
-    apply_skin_to_window = None
+import common
 
 
-def _apply_skin_to_tree(window):
-    if not apply_skin_to_window or not window:
-        return
-    try:
-        apply_skin_to_window(window)
-    except Exception:
-        return
-    for child in window.GetChildren():
-        _apply_skin_to_tree(child)
-
-class YoutubeSearchApp(wx.Frame):
-    def __init__(self, parent, *args, **kwargs):
-        super(YoutubeSearchApp, self).__init__(parent, *args, **kwargs)
-
-        self.SetTitle(_("YouTube Search"))
-        self.SetSize((600, 400))
-        panel = wx.Panel(self)
+class YoutubeSearchPanel(wx.Panel):
+    def __init__(self, parent, owner, *args, **kwargs):
+        super(YoutubeSearchPanel, self).__init__(parent, *args, **kwargs)
+        self.owner = owner
 
         vbox = wx.BoxSizer(wx.VERTICAL)
 
-        self.search_field = wx.TextCtrl(panel, style=wx.TE_PROCESS_ENTER)
+        self.search_field = wx.TextCtrl(self, style=wx.TE_PROCESS_ENTER)
         vbox.Add(self.search_field, flag=wx.EXPAND | wx.ALL, border=10)
         self.search_field.Bind(wx.EVT_TEXT_ENTER, self.on_search)
 
-        self.search_button = wx.Button(panel, label=_("Search"))
+        self.search_button = wx.Button(self, label=_("Search"))
         vbox.Add(self.search_button, flag=wx.ALL, border=10)
         self.search_button.Bind(wx.EVT_BUTTON, self.on_search)
 
-        self.results_list = wx.ListBox(panel)
+        self.results_list = wx.ListBox(self)
         vbox.Add(self.results_list, proportion=1, flag=wx.EXPAND | wx.ALL, border=10)
         self.results_list.Bind(wx.EVT_LISTBOX_DCLICK, self._show_selection_context_menu)
         self.results_list.Bind(wx.EVT_CHAR_HOOK, self.on_key_down)
         self.results_list.Bind(wx.EVT_RIGHT_DOWN, self.on_right_click)
 
-        panel.SetSizer(vbox)
-        _apply_skin_to_tree(self)
+        self.SetSizer(vbox)
+        common.apply_skin(self)
 
         self.query = None
         self.videos = []
-        
+
         # Simple cache for search results
         self.search_cache = {}
 
+    def focus_default(self):
+        self.search_field.SetFocus()
+
     def on_search(self, event):
-        self.GetParent().play_sound('enter')
+        common.play_sound('enter')
         query = self.search_field.GetValue().strip()
         if query:
             self.query = query
             
             # Check cache first
             if query in self.search_cache:
-                self.GetParent().play_sound('ding')
+                common.play_sound('ding')
                 self.videos = self.search_cache[query]
                 self.display_cached_results(query)
             else:
@@ -87,13 +75,60 @@ class YoutubeSearchApp(wx.Frame):
                 self.results_list.Append(display_text)
             
             result_count = len(self.videos)
-            self.GetParent().speak_message(_("Found %d cached results for: %s") % (result_count, query))
+            common.speak(_("Found %d cached results for: %s") % (result_count, query))
         else:
-            self.GetParent().speak_message(_("No cached results found"))
+            common.speak(_("No cached results found"))
+
+    def search_and_play_first(self, query):
+        """Search YouTube for ``query`` and immediately play the FIRST result.
+
+        Used when the app is launched with a search phrase (e.g. by the Titan
+        voice assistant: "play Nik Kershaw - The Riddle"). Runs off the GUI
+        thread and reuses :meth:`_extract_and_play` to resolve the stream."""
+        query = (query or '').strip()
+        if not query:
+            return
+        try:
+            self.search_field.SetValue(query)
+        except Exception:
+            pass
+        common.play_sound('loading')
+        common.speak(_("Searching for: %s") % query)
+
+        def _work():
+            ydl_opts = {
+                'quiet': True,
+                'no_warnings': True,
+                'extract_flat': True,
+                'no_check_certificate': True,
+                'geo_bypass': True,
+                'ignoreerrors': True,
+                'socket_timeout': 10,
+            }
+            try:
+                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                    result = ydl.extract_info(f"ytsearch1:{query}", download=False)
+                entries = [v for v in (result.get('entries') or []) if v] if result else []
+                if not entries:
+                    common.speak(_("No results found for: %s") % query)
+                    return
+                video = entries[0]
+                video_id = video.get('id', '')
+                title = video.get('title', query)
+                if not video_id:
+                    common.speak(_("No results found for: %s") % query)
+                    return
+                video_url = f"https://www.youtube.com/watch?v={video_id}"
+                common.speak(_("Playing: %s") % title)
+                self._extract_and_play(video_url, title)
+            except Exception as e:
+                common.speak(_("Search error: %s") % str(e))
+
+        threading.Thread(target=_work, daemon=True).start()
 
     def search_videos(self, query):
         self.results_list.Clear()
-        self.GetParent().play_sound('loading')
+        common.play_sound('loading')
 
         # Optimized yt-dlp options for faster search with anti-bot measures
         ydl_opts = {
@@ -143,42 +178,39 @@ class YoutubeSearchApp(wx.Frame):
                         # Cache the results for faster future searches
                         self.search_cache[query] = self.videos.copy()
                         
-                        self.GetParent().play_sound('ding')
+                        common.play_sound('ding')
                         result_count = len(self.videos)
-                        self.GetParent().speak_message(_("Found %d results for: %s") % (result_count, query))
+                        common.speak(_("Found %d results for: %s") % (result_count, query))
                     else:
-                        self.GetParent().speak_message(_("No results found for: %s") % query)
+                        common.speak(_("No results found for: %s") % query)
                 else:
-                    self.GetParent().speak_message(_("No results found for: %s") % query)
+                    common.speak(_("No results found for: %s") % query)
                     
         except Exception as e:
             error_msg = str(e)
             # Provide more specific error messages
             if "network" in error_msg.lower() or "connection" in error_msg.lower():
-                self.GetParent().speak_message(_("Network connection error. Check your internet connection."))
+                common.speak(_("Network connection error. Check your internet connection."))
             elif "timeout" in error_msg.lower():
-                self.GetParent().speak_message(_("Search timed out. Please try again."))
+                common.speak(_("Search timed out. Please try again."))
             else:
-                self.GetParent().speak_message(_("Search error: %s") % error_msg)
+                common.speak(_("Search error: %s") % error_msg)
 
     def _show_selection_context_menu(self, event=None):
         selection = self.results_list.GetSelection()
         if selection != wx.NOT_FOUND:
-            self.results_list.SetSelection(selection) # Ensure the item is selected
+            self.results_list.SetSelection(selection)
 
             menu = wx.Menu()
+            play_item = menu.Append(wx.ID_ANY, _("Play"))
             open_browser_item = menu.Append(wx.ID_ANY, _("Open in Browser"))
 
+            self.Bind(wx.EVT_MENU, self.on_play_video, play_item)
             self.Bind(wx.EVT_MENU, self.on_open_in_browser, open_browser_item)
 
-            # Determine position for the context menu
-            if event and hasattr(event, 'GetPosition'): # Check if it's a mouse event
+            if event and hasattr(event, 'GetPosition'):
                 pos = event.GetPosition()
-            else: # For keyboard events (Enter)
-                # For ListBox, we can't get item rect directly.
-                # Instead, we'll show the menu at the current mouse position or a default position.
-                # A simple approach is to show it at the center of the listbox or at the top-left.
-                # For now, let's use the current mouse position if available, otherwise a default.
+            else:
                 pos = self.results_list.GetPosition()
                 pos = self.results_list.ClientToScreen(pos)
 
@@ -188,6 +220,8 @@ class YoutubeSearchApp(wx.Frame):
     def on_key_down(self, event):
         if event.GetKeyCode() == wx.WXK_RETURN:
             self._show_selection_context_menu() # Call the new method
+        elif event.GetKeyCode() == wx.WXK_ESCAPE:
+            self.owner.go_back()
         else:
             event.Skip()
 
@@ -195,15 +229,76 @@ class YoutubeSearchApp(wx.Frame):
     def on_right_click(self, event):
         selection = self.results_list.GetSelection()
         if selection != wx.NOT_FOUND:
-            self.results_list.SetSelection(selection) # Select the item that was right-clicked
+            self.results_list.SetSelection(selection)
             menu = wx.Menu()
+            play_item = menu.Append(wx.ID_ANY, _("Play"))
             open_browser_item = menu.Append(wx.ID_ANY, _("Open in Browser"))
 
+            self.Bind(wx.EVT_MENU, self.on_play_video, play_item)
             self.Bind(wx.EVT_MENU, self.on_open_in_browser, open_browser_item)
 
             self.PopupMenu(menu, event.GetPosition())
             menu.Destroy()
 
+
+    def on_play_video(self, event):
+        selection = self.results_list.GetSelection()
+        if selection == wx.NOT_FOUND:
+            return
+
+        video = self.videos[selection]
+        video_id = video.get('id', '')
+        if not video_id:
+            common.speak(_("No valid video found"))
+            return
+
+        video_url = f"https://www.youtube.com/watch?v={video_id}"
+        title = video.get('title', video_id)
+
+        common.play_sound('loading')
+        common.speak(_("Extracting stream for: %s") % title)
+
+        threading.Thread(target=self._extract_and_play, args=(video_url, title), daemon=True).start()
+
+    def _extract_and_play(self, video_url, title):
+        ydl_opts = {
+            'quiet': True,
+            'no_warnings': True,
+            'no_check_certificate': True,
+            'geo_bypass': True,
+            'socket_timeout': 15,
+            'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'format': 'bestaudio[ext=m4a]/bestaudio/best',
+        }
+
+        try:
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(video_url, download=False)
+                if not info:
+                    wx.CallAfter(common.speak, _("Failed to extract video info"))
+                    return
+
+                stream_url = info.get('url')
+                if not stream_url:
+                    formats = info.get('formats', [])
+                    for fmt in reversed(formats):
+                        if fmt.get('url'):
+                            stream_url = fmt['url']
+                            break
+
+                if not stream_url:
+                    wx.CallAfter(common.speak, _("No playable stream found"))
+                    return
+
+                wx.CallAfter(self._open_player, stream_url, title)
+
+        except Exception as e:
+            wx.CallAfter(common.speak, _("Playback error: %s") % str(e))
+
+    def _open_player(self, stream_url, title):
+        common.play_sound('enteringtplayer')
+        common.speak(_("Playing: %s") % title)
+        self.owner.play_media(stream_url, title)
 
     def on_open_in_browser(self, event):
         selection = self.results_list.GetSelection()
@@ -222,7 +317,7 @@ class YoutubeSearchApp(wx.Frame):
             elif video.get('url'):
                 final_url = video.get('url')
             else:
-                self.GetParent().speak_message(_("No valid video URL found"))
+                common.speak(_("No valid video URL found"))
                 return
             
             webbrowser.open(final_url)

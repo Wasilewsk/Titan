@@ -356,8 +356,13 @@ class KeyboardHook:
         # ---- 3. NumPad object navigation + dial (NumLock off, no reader mod) -- #
         # NumPad Minus toggles the dial; NumPad 4/6/8/2/5/Enter drive object
         # navigation (or the dial when it is active). All route through the
-        # engine's modifier-gesture handler.
-        if (is_numpad_nav or key_name == "numpadsubtract") and not self._ctrl and not self._alt:
+        # engine's modifier-gesture handler. NumPad 4/6/8/2/5/Enter already only
+        # arrive here with NumLock off (their vk aliases with the digit keys
+        # otherwise -- see _normalize). NumPad Minus has no such aliasing (same
+        # vk regardless of NumLock), so it needs an explicit check to match NVDA
+        # and keep NumPad usable for typing digits when NumLock is on.
+        if (is_numpad_nav or (key_name == "numpadsubtract" and not self._numlock_on())) \
+                and not self._ctrl and not self._alt:
             try:
                 if self.engine.on_modifier_gesture(vk, key_name, self._ctrl,
                                                    self._alt, self._shift):
@@ -369,6 +374,14 @@ class KeyboardHook:
         # a Polish keyboard, so Ctrl+Alt combos now pass straight through.)
 
         # ---- 4. Plain key (browse mode quick-nav / arrows) ------------ #
+        # Tab / Shift+Tab: interrupt current speech immediately so the next
+        # element is read without waiting for the current announcement to
+        # finish (standard screen-reader behaviour: JAWS, NVDA, etc.).
+        if key_name == "tab" and is_down:
+            try:
+                self.engine.on_stop_speech_key()
+            except Exception:
+                pass
         try:
             if self.engine.on_plain_key(vk, key_name, self._ctrl,
                                         self._alt, self._shift):
@@ -448,6 +461,12 @@ class KeyboardHook:
             self.engine.on_toggle_key("caps", not cur)
         except Exception as e:
             print(f"[TitanAccess] keyboard_hook: caps tap error: {e}")
+
+    def _numlock_on(self):
+        try:
+            return bool(self._user32.GetKeyState(VK_NUMLOCK) & 0x0001)
+        except Exception:
+            return False
 
     def _handle_toggle(self, vk):
         try:

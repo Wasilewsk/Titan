@@ -5,6 +5,7 @@ Handles WebSocket communication with Titan-Net server for authentication and mes
 import asyncio
 import websockets
 import json
+import os
 import threading
 import time
 from typing import Optional, Dict, List, Callable
@@ -148,6 +149,8 @@ class TitanNetClient:
         self.on_new_user_broadcast: Optional[Callable] = None  # New user registration broadcast
 
         # Feedback Hub callbacks
+        self.on_forum_topic_moved: Optional[Callable] = None         # Your thread was moved
+        self.on_forum_move_request: Optional[Callable] = None        # A move needs your approval
         self.on_feedback_new: Optional[Callable] = None              # New feedback/idea submitted
         self.on_feedback_upvoted: Optional[Callable] = None          # Feedback/idea upvoted or unvoted
         self.on_feedback_status_changed: Optional[Callable] = None   # Feedback status / idea decision
@@ -171,6 +174,10 @@ class TitanNetClient:
         self.on_game_state_changed: Optional[Callable] = None        # Server pushed new state JSON
         self.on_game_token_warning: Optional[Callable] = None        # Approaching token cap
         self.on_game_menu: Optional[Callable] = None                 # AI presented a list of choices (gamebook / dialogue tree)
+
+        # Remote UI / server sounds
+        self.on_remote_screen_push: Optional[Callable] = None         # Server opened a screen on us
+        self.on_server_sound: Optional[Callable] = None               # Server asked us to play a sound
 
         # Cerberus Protocol callbacks
         self.on_cerberus_shutdown: Optional[Callable] = None   # Server demands PC shutdown (intrusion response)
@@ -1003,6 +1010,55 @@ class TitanNetClient:
                 'message': _('Error getting users: {error}').format(error=str(e))
             }
 
+    def block_user(self, user_id: int) -> Dict:
+        """Block a user ("full ignore"): they can no longer send you private
+        messages, and neither of you sees the other's room messages or online
+        status. Returns Dict with 'success' and optional 'error'."""
+        if not self.is_connected or not self.websocket:
+            return {'success': False, 'message': _('Not logged in')}
+        try:
+            async def _block():
+                response = await self._send_and_wait(
+                    {"type": "block_user", "user_id": user_id}, "block_result")
+                if response and response.get('type') == 'block_result':
+                    return {'success': response.get('success', False),
+                            'error': response.get('error')}
+                return {'success': False, 'message': _('No response from server')}
+            return self._run_async(_block())
+        except Exception as e:
+            return {'success': False, 'message': str(e)}
+
+    def unblock_user(self, user_id: int) -> Dict:
+        """Remove a block previously set with block_user()."""
+        if not self.is_connected or not self.websocket:
+            return {'success': False, 'message': _('Not logged in')}
+        try:
+            async def _unblock():
+                response = await self._send_and_wait(
+                    {"type": "unblock_user", "user_id": user_id}, "block_result")
+                if response and response.get('type') == 'block_result':
+                    return {'success': response.get('success', False),
+                            'error': response.get('error')}
+                return {'success': False, 'message': _('No response from server')}
+            return self._run_async(_unblock())
+        except Exception as e:
+            return {'success': False, 'message': str(e)}
+
+    def get_blocked_users(self) -> Dict:
+        """List the users you have blocked (for the management view)."""
+        if not self.is_connected or not self.websocket:
+            return {'success': False, 'message': _('Not logged in'), 'users': []}
+        try:
+            async def _get_blocked():
+                response = await self._send_and_wait(
+                    {"type": "get_blocked_users"}, "blocked_users")
+                if response and response.get('type') == 'blocked_users':
+                    return {'success': True, 'users': response.get('users', [])}
+                return {'success': False, 'users': [], 'message': _('No response from server')}
+            return self._run_async(_get_blocked())
+        except Exception as e:
+            return {'success': False, 'users': [], 'message': str(e)}
+
     def get_all_users(self) -> Dict:
         """
         Get list of all registered users (moderator/developer only)
@@ -1586,6 +1642,14 @@ class TitanNetClient:
                                 if self.on_cerberus_alert:
                                     self.on_cerberus_alert(message)
 
+                            elif msg_type == 'forum_topic_moved':
+                                # A moderator moved one of our threads
+                                if self.on_forum_topic_moved:
+                                    self.on_forum_topic_moved(message)
+                            elif msg_type == 'forum_move_request':
+                                # Someone wants to move a thread into a forum we moderate
+                                if self.on_forum_move_request:
+                                    self.on_forum_move_request(message)
                             elif msg_type == 'feedback_new':
                                 # New feedback or idea submitted to the Feedback Hub
                                 if self.on_feedback_new:
@@ -1655,6 +1719,15 @@ class TitanNetClient:
                             elif msg_type == 'game_menu':
                                 if self.on_game_menu:
                                     self.on_game_menu(message)
+
+                            # --- Remote UI / server sounds ---
+                            elif msg_type == 'remote_screen_push':
+                                # The server opened one of its own screens on us
+                                if self.on_remote_screen_push:
+                                    self.on_remote_screen_push(message)
+                            elif msg_type == 'play_server_sound':
+                                if self.on_server_sound:
+                                    self.on_server_sound(message)
 
                         except asyncio.TimeoutError:
                             continue
@@ -1910,7 +1983,8 @@ class TitanNetClient:
 
     def delete_forum_topic(self, topic_id: int) -> Dict:
         """
-        Delete forum topic (author or admin only)
+        Delete forum topic (author, server moderator/admin, or a
+        moderator/owner of the topic's group)
 
         Args:
             topic_id: Topic ID
@@ -2025,6 +2099,19 @@ class TitanNetClient:
                 f"{self.http_url}/api/groups/{group_id}",
                 json={'name': name, 'description': description,
                       'visibility': visibility, 'member_limit': member_limit},
+                headers=self._http_headers(),
+                timeout=10
+            )
+            return response.json()
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
+    def rename_group(self, group_id: int, name: str) -> Dict:
+        """Rename a group (owner or moderator)."""
+        try:
+            response = requests.post(
+                f"{self.http_url}/api/groups/{group_id}/rename",
+                json={'name': name},
                 headers=self._http_headers(),
                 timeout=10
             )
@@ -2228,13 +2315,24 @@ class TitanNetClient:
         except Exception as e:
             return {"success": False, "error": str(e)}
 
-    def send_mail(self, to_addr: str, subject: str, body: str) -> Dict:
+    def send_mail(self, to_addr: str, subject: str, body: str,
+                  body_html: str = '', content_type: str = 'text/plain') -> Dict:
         """Send mail from the user's username@domain identity. Local recipients
-        are delivered internally; remote ones go out via the server's mailer."""
+        are delivered internally; remote ones go out via the server's mailer.
+
+        ``body`` is always the readable plain-text version - it is what an old
+        server stores, what a client that cannot render markup shows, and what a
+        recipient whose mail program refuses HTML reads. ``body_html`` is the
+        formatted alternative sent beside it, and ``content_type`` records what
+        the author actually wrote (text/plain, text/markdown, text/html) so the
+        Mail client can show it back the same way."""
         try:
+            payload = {'to': to_addr, 'subject': subject, 'body': body,
+                       'content_type': content_type}
+            if body_html:
+                payload['body_html'] = body_html
             response = requests.post(
-                f"{self.http_url}/api/mail/send",
-                json={'to': to_addr, 'subject': subject, 'body': body},
+                f"{self.http_url}/api/mail/send", json=payload,
                 headers=self._http_headers(), timeout=15)
             return response.json()
         except Exception as e:
@@ -2409,6 +2507,42 @@ class TitanNetClient:
             response = requests.post(
                 f"{self.http_url}/api/extensions/{extension_id}/reject",
                 json={'note': note},
+                headers=self._http_headers(),
+                timeout=10
+            )
+            return response.json()
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
+    def disable_extension(self, extension_id: int) -> Dict:
+        """Take an active moderator component offline network-wide (staff only)."""
+        try:
+            response = requests.post(
+                f"{self.http_url}/api/extensions/{extension_id}/disable",
+                headers=self._http_headers(),
+                timeout=10
+            )
+            return response.json()
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
+    def enable_extension(self, extension_id: int) -> Dict:
+        """Restore a disabled moderator component to active (staff only)."""
+        try:
+            response = requests.post(
+                f"{self.http_url}/api/extensions/{extension_id}/enable",
+                headers=self._http_headers(),
+                timeout=10
+            )
+            return response.json()
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
+    def delete_extension(self, extension_id: int) -> Dict:
+        """Permanently delete a moderator component (staff only)."""
+        try:
+            response = requests.delete(
+                f"{self.http_url}/api/extensions/{extension_id}",
                 headers=self._http_headers(),
                 timeout=10
             )
@@ -3751,6 +3885,192 @@ class TitanNetClient:
 
             response = self._run_async(_send())
             return response if response else {"success": False, "error": _('No response from server')}
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
+    # =====================================================================
+    # REMOTE UI (server-defined screens)
+    # =====================================================================
+    # The server describes a dialog as JSON; src/network/remote_ui.py renders
+    # it with ordinary wx widgets. Nothing executable arrives, and a screen
+    # written on the server today opens on a Titan built long before it.
+
+    def list_remote_screens(self) -> Dict:
+        """Screens this account may open, for the Titan-Net Server menu."""
+        if not self.is_connected or not self.websocket:
+            return {"success": False, "error": _('Not logged in')}
+        try:
+            async def _send():
+                return await self._send_and_wait(
+                    {"type": "list_remote_screens"}, 'list_remote_screens_response', timeout=10)
+
+            response = self._run_async(_send())
+            return response if response else {"success": False, "error": _('No response from server')}
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
+    def open_remote_screen(self, slug: str) -> Dict:
+        """Ask the server to build one screen for us right now."""
+        if not self.is_connected or not self.websocket:
+            return {"success": False, "error": _('Not logged in')}
+        try:
+            async def _send():
+                return await self._send_and_wait(
+                    {"type": "open_remote_screen", "slug": slug},
+                    'open_remote_screen_response', timeout=15)
+
+            response = self._run_async(_send())
+            return response if response else {"success": False, "error": _('No response from server')}
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
+    def remote_screen_action(self, slug: str, action: str,
+                             values: Optional[Dict] = None,
+                             kind: str = 'submit') -> Dict:
+        """Send a button press (and the field values) back to the server.
+
+        ``kind`` is the button's declared action: 'submit' carries the form
+        and is validated field by field, 'action' carries nothing and skips
+        that check.
+        """
+        if not self.is_connected or not self.websocket:
+            return {"success": False, "error": _('Not logged in')}
+        try:
+            async def _send():
+                return await self._send_and_wait({
+                    "type": "remote_screen_action",
+                    "slug": slug,
+                    "action": action,
+                    "kind": kind,
+                    "values": values or {},
+                }, 'remote_screen_action_response', timeout=30)
+
+            response = self._run_async(_send())
+            return response if response else {"success": False, "error": _('No response from server')}
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
+    def save_remote_screen(self, slug: str, definition: Dict,
+                           handler: str = 'store', audience: str = 'everyone',
+                           in_menu: bool = True, active: bool = True) -> Dict:
+        """Staff: create or replace a screen (HTTP - it is server content)."""
+        try:
+            response = requests.post(
+                f"{self.http_url}/api/remote-screens",
+                json={"slug": slug, "definition": definition, "handler": handler,
+                      "audience": audience, "in_menu": in_menu, "active": active},
+                headers=self._http_headers(), timeout=15)
+            return response.json()
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
+    def delete_remote_screen(self, slug: str) -> Dict:
+        try:
+            response = requests.delete(
+                f"{self.http_url}/api/remote-screens/{slug}",
+                headers=self._http_headers(), timeout=10)
+            return response.json()
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
+    def get_remote_screen_submissions(self, slug: str, limit: int = 200) -> Dict:
+        """Staff: what users sent back from a screen using the 'store' handler."""
+        try:
+            response = requests.get(
+                f"{self.http_url}/api/remote-screens/{slug}/submissions",
+                params={"limit": limit}, headers=self._http_headers(), timeout=15)
+            return response.json()
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
+    # =====================================================================
+    # SERVER SOUNDS
+    # =====================================================================
+    # The server keeps a registry of sounds and can play any of them at one
+    # user, a role, a room or everybody. Audio is fetched over HTTP once and
+    # cached by sha256, so repeated plays cost nothing.
+
+    def list_server_sounds(self) -> Dict:
+        if not self.is_connected or not self.websocket:
+            return {"success": False, "error": _('Not logged in')}
+        try:
+            async def _send():
+                return await self._send_and_wait(
+                    {"type": "list_server_sounds"}, 'list_server_sounds_response', timeout=10)
+
+            response = self._run_async(_send())
+            return response if response else {"success": False, "error": _('No response from server')}
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
+    def trigger_server_sound(self, name: str, target: Optional[Dict] = None,
+                             volume: float = 1.0, loop_sound: bool = False,
+                             announce: Optional[str] = None) -> Dict:
+        """Staff: ask the server to play a sound at somebody.
+
+        ``target`` is ``{'type': 'all'}``, ``{'type': 'user', 'username': ...}``,
+        ``{'type': 'role', 'role': 'moderator'}`` or ``{'type': 'room', 'room_id': n}``.
+        """
+        if not self.is_connected or not self.websocket:
+            return {"success": False, "error": _('Not logged in')}
+        try:
+            async def _send():
+                message = {
+                    "type": "play_server_sound",
+                    "name": name,
+                    "target": target or {"type": "all"},
+                    "volume": volume,
+                    "loop": loop_sound,
+                }
+                if announce:
+                    message["announce"] = announce
+                return await self._send_and_wait(message, 'play_server_sound_response', timeout=15)
+
+            response = self._run_async(_send())
+            return response if response else {"success": False, "error": _('No response from server')}
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
+    def download_server_sound(self, name: str) -> Dict:
+        """Fetch one sound's bytes. Returns ``{'success', 'bytes', 'sha256'}``."""
+        try:
+            response = requests.get(
+                f"{self.http_url}/api/sounds/{name}",
+                headers=self._http_headers(), timeout=30)
+            payload = response.json()
+            if payload.get('success') and payload.get('content'):
+                payload['bytes'] = base64.b64decode(payload['content'])
+                payload.pop('content', None)
+            return payload
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
+    def upload_server_sound(self, name: str, file_path: str,
+                            description: Optional[str] = None) -> Dict:
+        """Staff: add a sound to the server registry."""
+        try:
+            with open(file_path, 'rb') as fh:
+                payload = fh.read()
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+        try:
+            response = requests.post(
+                f"{self.http_url}/api/sounds",
+                json={"name": name,
+                      "filename": os.path.basename(file_path),
+                      "description": description,
+                      "content": base64.b64encode(payload).decode()},
+                headers=self._http_headers(), timeout=60)
+            return response.json()
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
+    def delete_server_sound(self, name: str) -> Dict:
+        try:
+            response = requests.delete(
+                f"{self.http_url}/api/sounds/{name}",
+                headers=self._http_headers(), timeout=10)
+            return response.json()
         except Exception as e:
             return {"success": False, "error": str(e)}
 
