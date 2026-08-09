@@ -410,13 +410,33 @@ def run_agent(goal, tools, *, provider=None, model=None, system=None,
     bool`` gates a tool run (return False to skip). ``cancel_event`` is a
     threading.Event checked between steps and tool calls. Returns the final
     assistant text. Raises :class:`AgentCancelled` if cancelled, or the provider
-    error on failure.
-
     ``remember`` replays what was said in earlier runs (see ``src/ai/memory.py``)
     and records this one, so the user is having one continuing conversation
     rather than meeting a stranger each time. Pass False for a run that should
     not see or leave a trace - a background job, a one-off classification."""
+    method = ai_provider.get_ai_method()
     provider = provider or ai_provider.get_ai_provider()
+
+    # CLI methods are complete agents in their own right. Previously this
+    # function ignored the configured method and always entered the API tool
+    # loop, which made choosing Codex CLI still use the selected API provider.
+    if method != 'api':
+        if cancel_event is not None and cancel_event.is_set():
+            raise AgentCancelled()
+        cli_system = (system or DEFAULT_SYSTEM) + (
+            "\n\nYou are running through the selected local CLI. Use its own "
+            "capabilities to fulfil the request; do not claim that unavailable "
+            "Titan function calls were executed.")
+        reply = ai_provider.generate(
+            cli_system, goal, method=method, on_chunk=on_text_delta,
+            max_tokens=8000)
+        if cancel_event is not None and cancel_event.is_set():
+            raise AgentCancelled()
+        reply = (reply or '').strip()
+        if reply and on_text:
+            on_text(reply)
+        return reply
+
     api_key = ai_provider.get_ai_key(provider)
     if not api_key:
         raise RuntimeError(f"No API key configured for provider '{provider}'")

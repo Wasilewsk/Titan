@@ -243,6 +243,10 @@ class AssistantFrame(wx.Frame):
             return
         if self._running:
             return
+        if ai_provider.get_ai_method() != 'api' or ai_provider.get_ai_provider() != 'gemini':
+            wx.MessageBox(_("Live mode requires the Gemini API method. Use push-to-talk or typed chat to use the selected CLI."),
+                          _("Live mode unavailable"), wx.OK | wx.ICON_INFORMATION, self)
+            return
         if not voice_assistant.is_available():
             wx.MessageBox(_("The assistant needs AI features enabled and a Gemini "
                             "API key (Settings, AI features)."),

@@ -482,7 +482,7 @@ class TelegramVoiceClient:
 
     def _mark_connected(self, peer_name):
         """RINGING/CONNECTING -> CONNECTED, exactly once."""
-        if self.state in (self.CONNECTED, self.IDLE, self.ENDING):
+        if self.state not in (self.RINGING, self.CONNECTING):
             return
         self.call_start_time = datetime.now()
         self._set_state(self.CONNECTED, {'recipient': peer_name})

@@ -468,5 +468,10 @@
     "role": "assistant",
     "content": "Przeciągnęłam ikonę NVDA na pierwszą pozycję na Pulpicie (w lewy górny róg). Jeśli w Twoim systemie włączona jest opcja automatycznego rozmieszczania ikon, Windows może zachować domyślną siatkę, ale sam gest przeciągnięcia został wykonany!",
     "timestamp": 1786025851.6378133
+  },
+  {
+    "role": "user",
+    "content": "hello",
+    "timestamp": 1786273209.0345728
   }
 ]

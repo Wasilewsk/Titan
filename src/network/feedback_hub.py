@@ -103,6 +103,23 @@ def speak_notification(text, notification_type='info', play_sound_effect=True):
     speak_titannet(text)
 
 
+def _call_after_if_running(callback, *args, **kwargs):
+    """Schedule a UI callback only while wx still owns an application.
+
+    Feedback requests run on daemon threads. A request can complete after the
+    application has shut down, in which case `wx.CallAfter` raises instead of
+    silently discarding the no-longer-useful result. Do not let that turn into
+    an unhandled worker-thread exception.
+    """
+    try:
+        if wx.GetApp() is None:
+            return False
+        wx.CallAfter(callback, *args, **kwargs)
+        return True
+    except (AssertionError, RuntimeError):
+        return False
+
+
 # Make sure the sound mixer is up even when Feedback Hub is launched in a
 # context where the main TCE GUI never started (idempotent).
 try:
@@ -478,7 +495,7 @@ class FeedbackDetailDialog(wx.Dialog):
     def _reload(self, initial=False):
         def _fetch():
             result = self.titan_client.get_feedback(self.feedback_id)
-            wx.CallAfter(self._apply_item, result, initial)
+            _call_after_if_running(self._apply_item, result, initial)
 
         threading.Thread(target=_fetch, daemon=True).start()
 
@@ -567,7 +584,7 @@ class FeedbackDetailDialog(wx.Dialog):
 
         def _send():
             result = self.titan_client.upvote_feedback(feedback_id)
-            wx.CallAfter(self._on_upvote_result, result, title)
+            _call_after_if_running(self._on_upvote_result, result, title)
 
         threading.Thread(target=_send, daemon=True).start()
 
@@ -622,7 +639,7 @@ class FeedbackDetailDialog(wx.Dialog):
 
         def _send():
             result = self.titan_client.change_feedback_status(feedback_id, status_key)
-            wx.CallAfter(self._on_status_result, result)
+            _call_after_if_running(self._on_status_result, result)
 
         threading.Thread(target=_send, daemon=True).start()
 
@@ -651,7 +668,7 @@ class FeedbackDetailDialog(wx.Dialog):
 
         def _send():
             result = self.titan_client.delete_feedback(feedback_id)
-            wx.CallAfter(self._on_delete_result, result, title)
+            _call_after_if_running(self._on_delete_result, result, title)
 
         threading.Thread(target=_send, daemon=True).start()
 
@@ -681,7 +698,7 @@ class FeedbackDetailDialog(wx.Dialog):
 
         def _fetch():
             result = self.titan_client.get_feedback_attachment(feedback_id)
-            wx.CallAfter(self._on_attachment_loaded, result, name)
+            _call_after_if_running(self._on_attachment_loaded, result, name)
 
         threading.Thread(target=_fetch, daemon=True).start()
 
@@ -817,7 +834,7 @@ class FeedbackHubFrame(wx.Frame):
             pass
 
         # Initial load
-        wx.CallAfter(self._refresh_items, announce=False)
+        _call_after_if_running(self._refresh_items, announce=False)
 
     # ---- Construction -----------------------------------------------------
 
@@ -961,7 +978,7 @@ class FeedbackHubFrame(wx.Frame):
         else:
             text = _("Feedback Hub: 1 new feedback from {user}: {title}").format(user=author, title=title)
         speak_notification(text, 'info', play_sound_effect=False)
-        wx.CallAfter(self._refresh_items, announce=False)
+        _call_after_if_running(self._refresh_items, announce=False)
 
     def _handle_remote_upvote(self, message: Dict):
         title = message.get('title', '?')
@@ -975,7 +992,7 @@ class FeedbackHubFrame(wx.Frame):
         else:
             text = _("{title}: upvote removed by {user}").format(title=title, user=voter)
         speak_notification(text, 'info', play_sound_effect=False)
-        wx.CallAfter(self._refresh_items, announce=False)
+        _call_after_if_running(self._refresh_items, announce=False)
 
     def _handle_remote_status(self, message: Dict):
         item_type = message.get('item_type', ITEM_TYPE_FEEDBACK)
@@ -1001,10 +1018,10 @@ class FeedbackHubFrame(wx.Frame):
             text = _("{title}: status changed to {status}").format(
                 title=title, status=status_label(item_type, new_status))
         speak_notification(text, 'info', play_sound_effect=False)
-        wx.CallAfter(self._refresh_items, announce=False)
+        _call_after_if_running(self._refresh_items, announce=False)
 
     def _handle_remote_deleted(self, message: Dict):
-        wx.CallAfter(self._refresh_items, announce=False)
+        _call_after_if_running(self._refresh_items, announce=False)
 
     # ---- List management --------------------------------------------------
 
@@ -1055,7 +1072,7 @@ class FeedbackHubFrame(wx.Frame):
 
         def _fetch():
             result = self.titan_client.list_feedback(item_type=item_type)
-            wx.CallAfter(self._apply_items, result, announce, item_type)
+            _call_after_if_running(self._apply_items, result, announce, item_type)
 
         threading.Thread(target=_fetch, daemon=True).start()
 
@@ -1290,7 +1307,7 @@ class FeedbackHubFrame(wx.Frame):
 
         def _send():
             result = self.titan_client.delete_feedback(feedback_id)
-            wx.CallAfter(self._on_delete_result, result, title)
+            _call_after_if_running(self._on_delete_result, result, title)
 
         threading.Thread(target=_send, daemon=True).start()
 
@@ -1324,7 +1341,7 @@ class FeedbackHubFrame(wx.Frame):
                 attachment_data=payload.get('attachment_data'),
                 attachment_name=payload.get('attachment_name'),
             )
-            wx.CallAfter(self._on_new_result, result, payload['item_type'])
+            _call_after_if_running(self._on_new_result, result, payload['item_type'])
 
         threading.Thread(target=_send, daemon=True).start()
 

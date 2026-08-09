@@ -3,7 +3,7 @@ models).
 
 - Microphone capture: :func:`record_until_silence` records from the default
   input device (``sounddevice``) and stops on a trailing silence.
-- Speech-to-text: :func:`transcribe` sends the recorded audio to Gemini
+- Speech-to-text: :func:`transcribe` uses SpeechRecognition without an API key
   (multimodal) and returns the text -- transcription happens in the cloud.
 - Text-to-speech: :func:`speak` synthesizes the reply with the persona's Gemini
   prebuilt voice and plays it. If Gemini TTS is unavailable it falls back to
@@ -117,23 +117,38 @@ def record_until_silence(max_seconds=20.0, silence_seconds=0.9,
 
 
 # --------------------------------------------------------------------------- #
-# Speech-to-text (cloud)
+# Speech-to-text (no API key)
 # --------------------------------------------------------------------------- #
+def _recognition_language(language_hint):
+    """Convert Titan's language preference to a SpeechRecognition locale."""
+    value = (language_hint or 'en').replace('_', '-').strip()
+    if '-' in value:
+        return value
+    return {'pl': 'pl-PL', 'en': 'en-GB'}.get(value.lower(), value)
+
+
 def transcribe(wav_bytes, language_hint='pl'):
-    """Transcribe ``wav_bytes`` via Gemini. Returns the recognised text ('' if
-    empty). Raises on SDK/network failure."""
+    """Transcribe WAV audio through SpeechRecognition without an API key."""
     if not wav_bytes:
         return ''
-    client, types = _genai()
-    prompt = ("Transcribe this audio verbatim. Output ONLY the transcription "
-              "text with no quotes and no commentary. The speaker's language "
-              f"is likely '{language_hint}'.")
-    resp = client.models.generate_content(
-        model=_STT_MODEL,
-        contents=[types.Part.from_bytes(data=wav_bytes, mime_type='audio/wav'),
-                  prompt])
-    return (getattr(resp, 'text', '') or '').strip()
-
+    try:
+        import speech_recognition as sr
+    except ImportError as e:
+        raise RuntimeError(
+            "Speech recognition is not installed. Run: pip install SpeechRecognition"
+        ) from e
+    try:
+        recognizer = sr.Recognizer()
+        with sr.AudioFile(io.BytesIO(wav_bytes)) as source:
+            audio = recognizer.record(source)
+        return (recognizer.recognize_google(
+            audio, language=_recognition_language(language_hint)) or '').strip()
+    except sr.UnknownValueError:
+        return ''
+    except sr.RequestError as e:
+        raise RuntimeError(f"Speech recognition is unavailable: {e}") from e
+    except Exception as e:
+        raise RuntimeError(f"Could not transcribe audio: {e}") from e
 
 # --------------------------------------------------------------------------- #
 # Text-to-speech (cloud, STREAMING, with Titan TTS fallback)

@@ -12,8 +12,9 @@ Two modes:
   using the Gemini Live API (like Gemini / ChatGPT voice), interruptible via the
   same cancel event.
 
-The assistant always uses the Gemini provider (its voice + speech recognition
-are Gemini features), regardless of the provider chosen for other AI features.
+The selected AI method drives replies and actions. Voice transcription and live
+mode remain Gemini-specific because local CLIs do not provide speech-to-text or
+real-time audio.
 """
 
 import threading
@@ -32,10 +33,9 @@ except Exception:  # pragma: no cover
     def play_sound(*_a, **_k):
         pass
 
-# Shared with everything else that has to use the assistant's own account -
-# AI OCR resolves its vision provider from the same constant, so the two can
-# never drift onto different keys.
-_ASSISTANT_PROVIDER = ai_provider.ASSISTANT_PROVIDER
+# Gemini remains the dedicated speech-recognition and live-voice backend. Keep
+# this shared constant so assistant voice and AI OCR use the same account.
+_TRANSCRIPTION_PROVIDER = ai_provider.ASSISTANT_PROVIDER
 
 SOUND_INITIALIZED = 'ai/initialized.ogg'   # assistant launched / listening
 SOUND_DICTATION_END = 'ai/ui1.ogg'         # end of dictation
@@ -70,8 +70,8 @@ class _ThinkingCue:
 
 
 def is_available():
-    """True if the assistant can run: AI enabled and a Gemini key is present."""
-    return ai_provider.is_ai_enabled() and bool(ai_provider.get_ai_key(_ASSISTANT_PROVIDER))
+    """True when the configured API provider or local CLI is usable."""
+    return ai_provider.is_ai_ready()
 
 
 def build_system(persona):
@@ -177,11 +177,12 @@ def run_turn(persona, *, goal_text=None, on_status=None, on_transcript=None,
     # Default to Titan's configured language, never a hardcoded 'pl'.
     language = language or _titan_language()
 
-    if not ai_provider.get_ai_key(_ASSISTANT_PROVIDER):
-        raise RuntimeError("The assistant needs a Gemini API key "
-                           "(Settings, AI features).")
+    if not ai_provider.is_ai_ready():
+        raise RuntimeError("The assistant needs AI features enabled and the selected "
+                           "provider or CLI configured (Settings, AI features).")
 
-    # 1. Capture speech unless the caller supplied typed text.
+    # 1. Capture speech unless the caller supplied typed text. SpeechRecognition
+    # does not need an API key and keeps microphone transcription off Gemini.
     goal_audio = None
     if goal_text is None:
         play_sound(SOUND_INITIALIZED)
@@ -193,25 +194,15 @@ def run_turn(persona, *, goal_text=None, on_status=None, on_transcript=None,
         if not wav:
             status("nothing_heard")
             return ''
-        # Feed the audio straight to the agent instead of transcribing first.
-        # Transcription still runs, but in the BACKGROUND, only to show the
-        # on-screen transcript and log the persona turn - it never delays speech.
-        goal_audio = {'data': wav, 'mime_type': 'audio/wav'}
-        goal_arg = ("The user's request is in the attached audio. Understand "
-                    "what they said and carry it out.")
-
-        def _bg_transcribe():
-            try:
-                txt = (voice_io.transcribe(wav, language_hint=language) or '').strip()
-            except Exception as e:
-                print(f"[assistant] background transcript failed: {e}")
-                return
-            if txt:
-                if on_transcript:
-                    on_transcript(txt)
-                personas_mod.append_history(persona, 'user', txt)
-                ai_buffer.push_user(txt)
-        threading.Thread(target=_bg_transcribe, daemon=True).start()
+        status("transcribing")
+        goal_arg = (voice_io.transcribe(wav, language_hint=language) or '').strip()
+        if not goal_arg:
+            status("nothing_heard")
+            return ''
+        if on_transcript:
+            on_transcript(goal_arg)
+        personas_mod.append_history(persona, 'user', goal_arg)
+        ai_buffer.push_user(goal_arg)
     else:
         goal_text = (goal_text or '').strip()
         if not goal_text:
@@ -288,7 +279,7 @@ def run_turn(persona, *, goal_text=None, on_status=None, on_transcript=None,
 
     try:
         reply = run_agent(
-            goal_arg, tools, provider=_ASSISTANT_PROVIDER, system=system,
+            goal_arg, tools, system=system,
             on_text=(on_reply if on_reply else None), on_text_delta=_delta,
             goal_audio=goal_audio,
             on_tool_start=_tool_start, on_tool_result=_tool_result,
@@ -336,10 +327,6 @@ def run_dictation(*, on_status=None, on_transcript=None, cancel_event=None,
             on_status(msg)
 
     language = language or _titan_language()
-    if not ai_provider.get_ai_key(_ASSISTANT_PROVIDER):
-        raise RuntimeError("The assistant needs a Gemini API key "
-                           "(Settings, AI features).")
-
     play_sound(SOUND_INITIALIZED)
     status("listening")
     wav = voice_io.record_until_silence(cancel_event=cancel_event)
@@ -439,7 +426,7 @@ class LiveSession:
     async def _session(self):
         from google import genai
 
-        key = ai_provider.get_ai_key(_ASSISTANT_PROVIDER)
+        key = ai_provider.get_ai_key(_TRANSCRIPTION_PROVIDER)
         if not key:
             self._status("error: no Gemini key")
             return
