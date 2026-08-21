@@ -121,6 +121,12 @@ class ConfirmDialogResultTest(unittest.TestCase):
 
         self.assertEqual(calls, [], "a declined confirmation still deleted")
 
+    def test_worker_completion_without_wx_app_does_not_raise(self):
+        """A request finishing during shutdown must not crash its worker."""
+        from src.network import feedback_hub
+
+        self.assertFalse(feedback_hub._call_after_if_running(lambda: None))
+
 
 class StaffRoleTest(unittest.TestCase):
     """The client offers moderator actions to admins - the server must agree.
@@ -185,7 +191,7 @@ class TelegramVoiceTest(unittest.TestCase):
         source = self._source()
         self.assertIn("RINGING = 'ringing'", source)
         start = source.index('async def start_call')
-        end = source.index('# === MICROPHONE ===', start)
+        end = source.index('async def _resolve_target', start)
         body = source[start:end]
         self.assertIn('self.RINGING', body)
         self.assertNotIn('self.CONNECTED', body,
@@ -195,7 +201,7 @@ class TelegramVoiceTest(unittest.TestCase):
         source = self._source()
         start = source.index('def _mark_connected')
         body = source[start:start + 600]
-        self.assertIn('if self.state != self.RINGING', body)
+        self.assertIn('self.state not in (self.RINGING, self.CONNECTING)', body)
 
 
 # ---------------------------------------------------------------------------
